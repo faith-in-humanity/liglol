@@ -3,7 +3,7 @@
 // @namespace    local.autoskip
 // @version      1.0.0-beta.1
 // @description  Hands-free ad skipping on YouTube and auto "Skip Intro" on anime sites
-// @author       Nik
+// @author       faith-in-humanity
 // @license      MIT
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -104,11 +104,10 @@
 
   // YouTube: two states driven by the ad class on #movie_player.
   //   ad present -> mute + 16x + seek to end (+ best-effort Skip click);
-  //                 if still stuck, reload the video ad-free at the saved spot;
+  //                 if the ad is frozen (media blocked), reload it ad-free;
   //   ad gone    -> restore speed and mute state.
   const AD_RATE = 16.0;
-  const STUCK_DEAD_MS = 500;
-  const STUCK_ALIVE_MS = 1000;
+  const RELOAD_AFTER_MS = 500;
   const RELOAD_LIMIT = 3;
   const RELOAD_WINDOW_MS = 60000;
   const AD_CLASSES = ['ad-showing', 'ad-interrupting'];
@@ -116,6 +115,8 @@
   let ytAdActive = false;
   let ytSavedMuted = false;
   let ytAdStartedAt = 0;
+  let ytAdSeenTime = -1;
+  let ytAdProgressAt = 0;
   let ytReloadedThisBreak = false;
   let ytReloadTimes = [];
   let lastContentVideoId = null;
@@ -137,9 +138,12 @@
     const video = getYoutubeVideo(player);
 
     if (adShowing && SKIP_ADS) {
+      const now = Date.now();
       if (!ytAdActive) {
         ytAdActive = true;
-        ytAdStartedAt = Date.now();
+        ytAdStartedAt = now;
+        ytAdProgressAt = now;
+        ytAdSeenTime = -1;
         ytReloadedThisBreak = false;
         ytSavedMuted = video ? video.muted : false;
         log('Ad mode ON');
@@ -157,15 +161,17 @@
         }
       }
 
-      // If the ad media never loaded (e.g. blocked by an ad blocker) the seek
-      // can't finish it, so reload the same video without the ad break.
-      const mediaDead = !video || !isFinite(video.duration) || video.duration <= 0 || video.readyState < 2;
-      const stuckAfter = mediaDead ? STUCK_DEAD_MS : STUCK_ALIVE_MS;
-      if (!ytReloadedThisBreak && Date.now() - ytAdStartedAt > stuckAfter) {
+      // A frozen ad (media blocked upstream) never advances and can't be seeked
+      // past; a normal ad advances at 16x and the seek finishes it. When frozen,
+      // reload the same video — it comes back without the ad break.
+      const t = video ? video.currentTime : 0;
+      if (t !== ytAdSeenTime) { ytAdSeenTime = t; ytAdProgressAt = now; }
+      const frozen = now - ytAdProgressAt > RELOAD_AFTER_MS;
+      const durationBad = !video || !isFinite(video.duration) || video.duration <= 0;
+      if (!ytReloadedThisBreak && now - ytAdStartedAt > RELOAD_AFTER_MS && (frozen || durationBad)) {
         ytReloadedThisBreak = true;
+        ytReloadTimes = ytReloadTimes.filter((x) => now - x < RELOAD_WINDOW_MS);
         const id = getWatchVideoId();
-        const now = Date.now();
-        ytReloadTimes = ytReloadTimes.filter((t) => now - t < RELOAD_WINDOW_MS);
         if (id && ytReloadTimes.length < RELOAD_LIMIT && typeof player.loadVideoById === 'function') {
           ytReloadTimes.push(now);
           let start = id === lastContentVideoId ? Math.floor(lastContentTime) : 0;
