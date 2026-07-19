@@ -1,3 +1,5 @@
+![License](https://img.shields.io/github/license/faith-in-humanity/liglol?color=blue)
+![Stage](https://img.shields.io/badge/stage-beta-orange)
 # Auto-Skip Ads & Intro ⏭
 
 **Hands-free ad skipping for YouTube + auto "Skip Intro" on anime sites.**
