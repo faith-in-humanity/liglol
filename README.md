@@ -104,3 +104,4 @@ const DEBUG = false;      // поставь true, чтобы видеть лог
 ## Лицензия
 
 [MIT](LICENSE) — можно свободно использовать, менять и распространять.
+[raw-link]: https://github.com/faith-in-humanity/liglol/raw/main/auto-skip.user.js
