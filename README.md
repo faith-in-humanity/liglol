@@ -32,9 +32,9 @@ When the ad class disappears, your original speed and sound are restored.
 2. Enable the extension in Safari settings and allow it on the sites you need.
 3. Put `auto-skip.user.js` into the Userscripts folder (or create a new script in the app and paste the file's contents).
 4. Reload the tab. Done — there is no on-page UI.
-5. [![Install](https://img.shields.io/badge/Install-Click_to_Install-green)][raw-link]
 
 Also works in Tampermonkey/Violentmonkey (Chrome, Firefox, Edge) — the script only uses standard web APIs.
+![Install](https://img.shields.io/badge/Install-Click_to_Install-green)
 
 ## On/off switch
 
@@ -85,9 +85,9 @@ Skipping ads is against YouTube's Terms of Service, like any ad blocker. No acco
 2. Включи расширение в настройках Safari и разреши его на нужных сайтах.
 3. Положи файл `auto-skip.user.js` в папку Userscripts (или создай новый скрипт в приложении и вставь содержимое файла).
 4. Перезагрузи вкладку. Всё — кнопок на странице нет, ничего настраивать не нужно.
-5. [![Install](https://img.shields.io/badge/Install-Click_to_Install-green)][raw-link]
 
 Работает и в Tampermonkey/Violentmonkey (Chrome, Firefox, Edge).
+![Install](https://img.shields.io/badge/Install-Click_to_Install-green)
 
 ## Включение и выключение
 
