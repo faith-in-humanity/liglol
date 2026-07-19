@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto-Skip Ads & Intro (YouTube + Anime sites)
 // @namespace    local.autoskip
-// @version      1.0.0-beta.1
+// @version      1.0.0-beta.2
 // @description  Hands-free ad skipping on YouTube and auto "Skip Intro" on anime sites
 // @author       faith-in-humanity
 // @license      MIT
@@ -110,6 +110,9 @@
   const RELOAD_AFTER_MS = 500;
   const RELOAD_LIMIT = 3;
   const RELOAD_WINDOW_MS = 60000;
+  const POST_AD_WATCH_MS = 20000;
+  const STALL_MS = 1500;
+  const NUDGE_COOLDOWN_MS = 4000;
   const AD_CLASSES = ['ad-showing', 'ad-interrupting'];
   const SKIP_BUTTON_SELECTOR = '.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button';
   let ytAdActive = false;
@@ -119,6 +122,10 @@
   let ytAdProgressAt = 0;
   let ytReloadedThisBreak = false;
   let ytReloadTimes = [];
+  let ytAdEndedAt = 0;
+  let ytStallSeenTime = -1;
+  let ytStallProgressAt = 0;
+  let ytLastNudgeAt = 0;
   let lastContentVideoId = null;
   let lastContentTime = 0;
 
@@ -183,11 +190,39 @@
     } else {
       if (ytAdActive) {
         ytAdActive = false;
+        ytAdEndedAt = Date.now();
+        ytStallSeenTime = -1;
+        ytStallProgressAt = Date.now();
         if (video) {
           video.playbackRate = 1.0;
           video.muted = ytSavedMuted;
         }
         log('Ad mode OFF — playback restored');
+      }
+
+      // Post-ad stall watchdog: the player sometimes hangs on a black buffering
+      // screen after an ad break; a pause/play nudge unfreezes it. Never fires
+      // while the user has the video paused.
+      if (video && !video.paused && ytAdEndedAt && Date.now() - ytAdEndedAt < POST_AD_WATCH_MS) {
+        const now = Date.now();
+        const t = video.currentTime;
+        if (t !== ytStallSeenTime) {
+          ytStallSeenTime = t;
+          ytStallProgressAt = now;
+        } else if (now - ytStallProgressAt > STALL_MS && now - ytLastNudgeAt > NUDGE_COOLDOWN_MS) {
+          ytLastNudgeAt = now;
+          try {
+            if (typeof player.pauseVideo === 'function' && typeof player.playVideo === 'function') {
+              player.pauseVideo();
+              player.playVideo();
+            } else {
+              video.pause();
+              const p = video.play();
+              if (p && p.catch) p.catch(() => {});
+            }
+            log('Post-ad stall — nudged playback');
+          } catch (e) {}
+        }
       }
       // Track the content position; ignore ticks where an ad is still loading.
       const id = getWatchVideoId();
