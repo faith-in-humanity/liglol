@@ -34,6 +34,7 @@ When the ad class disappears, your original speed and sound are restored.
 4. Reload the tab. Done — there is no on-page UI.
 
 Also works in Tampermonkey/Violentmonkey (Chrome, Firefox, Edge) — the script only uses standard web APIs.
+
 ![Install](https://img.shields.io/badge/Install-Click_to_Install-green)
 
 ## On/off switch
@@ -87,6 +88,7 @@ Skipping ads is against YouTube's Terms of Service, like any ad blocker. No acco
 4. Перезагрузи вкладку. Всё — кнопок на странице нет, ничего настраивать не нужно.
 
 Работает и в Tampermonkey/Violentmonkey (Chrome, Firefox, Edge).
+
 ![Install](https://img.shields.io/badge/Install-Click_to_Install-green)
 
 ## Включение и выключение
