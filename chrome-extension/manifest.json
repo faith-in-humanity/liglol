@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Auto-Skip Ads & Intro (YouTube + Anime)",
+  "version": "1.0.1",
+  "description": "Hands-free ad skipping on YouTube and auto \"Skip Intro\" on anime sites. No network requests, no tracking.",
+  "author": "faith-in-humanity",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://youtube.com/*",
+        "https://jut.su/*",
+        "https://animego.org/*",
+        "https://anilibria.tv/*",
+        "https://animevost.org/*",
+        "https://2anime.ru/*",
+        "https://yummyanime.tv/*",
+        "https://gogoanime.run/*",
+        "https://gogoanime.sk/*",
+        "https://9anime.to/*",
+        "https://zoro.to/*",
+        "https://animixplay.to/*",
+        "https://twist.moe/*",
+        "https://kickassanime.ro/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
