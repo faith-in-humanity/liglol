@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto-Skip Ads & Intro (YouTube + Anime sites)
 // @namespace    local.autoskip
-// @version      1.0.0-beta.2
+// @version      1.0.0-beta.4
 // @description  Hands-free ad skipping on YouTube and auto "Skip Intro" on anime sites
 // @author       faith-in-humanity
 // @license      MIT
@@ -12,6 +12,14 @@
 // @match        https://anilibria.tv/*
 // @match        https://animevost.org/*
 // @match        https://2anime.ru/*
+// @match        https://yummyanime.tv/*
+// @match        https://gogoanime.run/*
+// @match        https://gogoanime.sk/*
+// @match        https://9anime.to/*
+// @match        https://zoro.to/*
+// @match        https://animixplay.to/*
+// @match        https://twist.moe/*
+// @match        https://kickassanime.ro/*
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -68,6 +76,41 @@
       ad: { selectors: [], texts: ['Пропустить рекламу', 'Пропустить', 'Skip Ad', 'Skip'] },
       intro: { selectors: [], texts: ['Пропустить интро', 'Skip Intro'] },
     },
+    {
+      hostnames: ['yummyanime.tv'],
+      ad: { selectors: [], texts: ['Пропустить рекламу', 'Пропустить', 'Skip Ad', 'Skip'] },
+      intro: { selectors: [], texts: ['Пропустить интро', 'Skip Intro'] },
+    },
+    {
+      hostnames: ['gogoanime.run', 'gogoanime.sk', 'gogoanime.info'],
+      ad: { selectors: [], texts: ['Пропустить рекламу', 'Пропустить', 'Skip Ad', 'Skip'] },
+      intro: { selectors: [], texts: ['Пропустить интро', 'Skip Intro'] },
+    },
+    {
+      hostnames: ['9anime.to'],
+      ad: { selectors: [], texts: ['Пропустить рекламу', 'Пропустить', 'Skip Ad', 'Skip'] },
+      intro: { selectors: [], texts: ['Пропустить интро', 'Skip Intro'] },
+    },
+    {
+      hostnames: ['zoro.to'],
+      ad: { selectors: [], texts: ['Пропустить рекламу', 'Пропустить', 'Skip Ad', 'Skip'] },
+      intro: { selectors: [], texts: ['Пропустить интро', 'Skip Intro'] },
+    },
+    {
+      hostnames: ['animixplay.to'],
+      ad: { selectors: [], texts: ['Пропустить рекламу', 'Пропустить', 'Skip Ad', 'Skip'] },
+      intro: { selectors: [], texts: ['Пропустить интро', 'Skip Intro'] },
+    },
+    {
+      hostnames: ['twist.moe'],
+      ad: { selectors: [], texts: ['Пропустить рекламу', 'Пропустить', 'Skip Ad', 'Skip'] },
+      intro: { selectors: [], texts: ['Пропустить интро', 'Skip Intro'] },
+    },
+    {
+      hostnames: ['kickassanime.ro'],
+      ad: { selectors: [], texts: ['Пропустить рекламу', 'Пропустить', 'Skip Ad', 'Skip'] },
+      intro: { selectors: [], texts: ['Пропустить интро', 'Skip Intro'] },
+    },
   ];
 
   const UNIVERSAL_AD_TEXTS = ['Пропустить рекламу', 'Пропустить', 'Skip Ad', 'Skip Ads', 'Skip'];
@@ -113,6 +156,8 @@
   const POST_AD_WATCH_MS = 20000;
   const STALL_MS = 1500;
   const NUDGE_COOLDOWN_MS = 4000;
+  const REWIND_S = 2;
+  const TRACK_GAP_CAP_S = 3;
   const AD_CLASSES = ['ad-showing', 'ad-interrupting'];
   const SKIP_BUTTON_SELECTOR = '.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button';
   let ytAdActive = false;
@@ -128,6 +173,7 @@
   let ytLastNudgeAt = 0;
   let lastContentVideoId = null;
   let lastContentTime = 0;
+  let lastContentSavedAt = 0;
 
   function getYoutubeVideo(player) {
     return player.querySelector('video.html5-main-video') || player.querySelector('video');
@@ -181,8 +227,15 @@
         const id = getWatchVideoId();
         if (id && ytReloadTimes.length < RELOAD_LIMIT && typeof player.loadVideoById === 'function') {
           ytReloadTimes.push(now);
-          let start = id === lastContentVideoId ? Math.floor(lastContentTime) : 0;
-          if (start < 2) start = 0;
+          // Estimate the true interruption point: tracking stops a moment before
+          // the ad class appears, so add that gap back (capped), then step back
+          // REWIND_S on purpose — a small controlled rewind, never a skip forward.
+          let start = 0;
+          if (id === lastContentVideoId && lastContentSavedAt) {
+            const gap = Math.min(Math.max((ytAdStartedAt - lastContentSavedAt) / 1000, 0), TRACK_GAP_CAP_S);
+            start = lastContentTime + gap - REWIND_S;
+          }
+          start = start < 2 ? 0 : Math.round(start * 10) / 10;
           log('Ad stuck — reloading video ad-free at ' + start + 's');
           try { player.loadVideoById({ videoId: id, startSeconds: start }); } catch (e) {}
         }
@@ -232,6 +285,7 @@
           if (!data || !data.video_id || data.video_id === id) {
             lastContentVideoId = id;
             lastContentTime = player.getCurrentTime() || 0;
+            lastContentSavedAt = Date.now();
           }
         } catch (e) {}
       }
