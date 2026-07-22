@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Auto-Skip Ads & Intro (YouTube + Anime sites)
 // @namespace    local.autoskip
-// @version      1.0.0-beta.4
+// @version      1.0.0-beta.5
 // @description  Hands-free ad skipping on YouTube and auto "Skip Intro" on anime sites
 // @author       faith-in-humanity
 // @license      MIT
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
+// @match        https://www.tiktok.com/*
+// @match        https://tiktok.com/*
 // @match        https://jut.su/*
 // @match        https://animego.org/*
 // @match        https://anilibria.tv/*
@@ -36,6 +38,11 @@
   }
 
   const SITE_CONFIGS = [
+    {
+      hostnames: ['tiktok.com', 'www.tiktok.com'],
+      ad: { selectors: [], texts: [] },
+      intro: { selectors: [], texts: [] },
+    },
     {
       hostnames: ['youtube.com', 'www.youtube.com'],
       ad: {
@@ -121,6 +128,7 @@
     cfg.hostnames.some((h) => currentHost === h || currentHost.endsWith('.' + h))
   );
   const isYoutube = currentHost === 'youtube.com';
+  const isTiktok = currentHost === 'tiktok.com';
 
   const adSelectors = siteConfig ? siteConfig.ad.selectors : [];
   const adTexts = siteConfig ? [...new Set([...siteConfig.ad.texts, ...UNIVERSAL_AD_TEXTS])] : UNIVERSAL_AD_TEXTS;
@@ -145,10 +153,6 @@
     return rect.width > 0 && rect.height > 0;
   }
 
-  // YouTube: two states driven by the ad class on #movie_player.
-  //   ad present -> mute + 16x + seek to end (+ best-effort Skip click);
-  //                 if the ad is frozen (media blocked), reload it ad-free;
-  //   ad gone    -> restore speed and mute state.
   const AD_RATE = 16.0;
   const RELOAD_AFTER_MS = 500;
   const RELOAD_LIMIT = 3;
@@ -175,6 +179,44 @@
   let lastContentTime = 0;
   let lastContentSavedAt = 0;
 
+  const TT_AD_LABELS = ['sponsored', 'реклама', 'promoted', 'gesponsert', 'sponsorisé', 'patrocinado', 'sponsorizzato', 'sponsorlu', '广告', '광고'];
+  const TT_SKIP_COOLDOWN_MS = 2500;
+  let ttLastSkipAt = 0;
+
+  function isInViewport(el) {
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 &&
+      rect.top >= -50 && rect.bottom <= window.innerHeight + 50;
+  }
+
+  function isTiktokAdVisible() {
+    for (const el of document.querySelectorAll('[data-e2e*="browse-ad"], [data-e2e*="ad-badge"]')) {
+      if (isInViewport(el)) return true;
+    }
+    for (const el of document.querySelectorAll('span, a, div')) {
+      if (el.children.length > 0) continue;
+      const text = (el.textContent || '').trim();
+      if (text.length < 2 || text.length > 20) continue;
+      if (TT_AD_LABELS.includes(text.toLowerCase()) && isInViewport(el)) return true;
+    }
+    return false;
+  }
+
+  function handleTiktokAd() {
+    if (!SKIP_ADS) return;
+    const now = Date.now();
+    if (now - ttLastSkipAt < TT_SKIP_COOLDOWN_MS) return;
+    if (!isTiktokAdVisible()) return;
+    ttLastSkipAt = now;
+    log('TikTok sponsored video — scrolling past');
+    const downBtn = document.querySelector('button[data-e2e="arrow-right"], button[data-e2e="arrow-down"]');
+    if (downBtn && isElementClickable(downBtn)) {
+      safeClick(downBtn, 'tt-next');
+    } else {
+      window.scrollBy({ top: window.innerHeight, behavior: 'smooth' });
+    }
+  }
+
   function getYoutubeVideo(player) {
     return player.querySelector('video.html5-main-video') || player.querySelector('video');
   }
@@ -186,10 +228,8 @@
   function handleYoutubeAd() {
     const player = document.getElementById('movie_player');
     if (!player) return;
-
     const adShowing = AD_CLASSES.some((c) => player.classList.contains(c));
     const video = getYoutubeVideo(player);
-
     if (adShowing && SKIP_ADS) {
       const now = Date.now();
       if (!ytAdActive) {
@@ -201,9 +241,7 @@
         ytSavedMuted = video ? video.muted : false;
         log('Ad mode ON');
       }
-
       player.querySelectorAll(SKIP_BUTTON_SELECTOR).forEach((b) => safeClick(b, 'yt-skip'));
-
       if (video) {
         if (!video.muted) video.muted = true;
         if (video.playbackRate !== AD_RATE) video.playbackRate = AD_RATE;
@@ -213,10 +251,6 @@
           if (p && p.catch) p.catch(() => {});
         }
       }
-
-      // A frozen ad (media blocked upstream) never advances and can't be seeked
-      // past; a normal ad advances at 16x and the seek finishes it. When frozen,
-      // reload the same video — it comes back without the ad break.
       const t = video ? video.currentTime : 0;
       if (t !== ytAdSeenTime) { ytAdSeenTime = t; ytAdProgressAt = now; }
       const frozen = now - ytAdProgressAt > RELOAD_AFTER_MS;
@@ -227,9 +261,6 @@
         const id = getWatchVideoId();
         if (id && ytReloadTimes.length < RELOAD_LIMIT && typeof player.loadVideoById === 'function') {
           ytReloadTimes.push(now);
-          // Estimate the true interruption point: tracking stops a moment before
-          // the ad class appears, so add that gap back (capped), then step back
-          // REWIND_S on purpose — a small controlled rewind, never a skip forward.
           let start = 0;
           if (id === lastContentVideoId && lastContentSavedAt) {
             const gap = Math.min(Math.max((ytAdStartedAt - lastContentSavedAt) / 1000, 0), TRACK_GAP_CAP_S);
@@ -252,10 +283,6 @@
         }
         log('Ad mode OFF — playback restored');
       }
-
-      // Post-ad stall watchdog: the player sometimes hangs on a black buffering
-      // screen after an ad break; a pause/play nudge unfreezes it. Never fires
-      // while the user has the video paused.
       if (video && !video.paused && ytAdEndedAt && Date.now() - ytAdEndedAt < POST_AD_WATCH_MS) {
         const now = Date.now();
         const t = video.currentTime;
@@ -277,7 +304,6 @@
           } catch (e) {}
         }
       }
-      // Track the content position; ignore ticks where an ad is still loading.
       const id = getWatchVideoId();
       if (id && typeof player.getCurrentTime === 'function') {
         try {
@@ -297,7 +323,6 @@
     const x = rect.left + rect.width / 2;
     const y = rect.top + rect.height / 2;
     const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
-
     try { el.dispatchEvent(new PointerEvent('pointerover', opts)); } catch (e) {}
     try { el.dispatchEvent(new PointerEvent('pointerdown', opts)); } catch (e) {}
     try { el.dispatchEvent(new PointerEvent('pointerup', opts)); } catch (e) {}
@@ -307,7 +332,6 @@
     try { el.click(); } catch (e) {}
   }
 
-  // Never auto-click a link that downloads a file or leaves the current site.
   function isSafeToAutoClick(el) {
     const anchor = el && el.closest ? el.closest('a[href]') : null;
     if (!anchor) return true;
@@ -325,11 +349,9 @@
     const target = resolveClickTarget(el);
     if (!isElementClickable(target)) return false;
     if (!isSafeToAutoClick(target)) return false;
-
     const now = Date.now();
     if (now - (lastClickAt.get(target) || 0) < CLICK_COOLDOWN_MS) return false;
     lastClickAt.set(target, now);
-
     try {
       activate(target);
       log('Clicked: ' + label);
@@ -391,12 +413,14 @@
       handleYoutubeAd();
       return;
     }
-
+    if (isTiktok) {
+      handleTiktokAd();
+      return;
+    }
     if (SKIP_ADS) {
       const raw = [...findBySelectors(adSelectors), ...findByText(adTexts)];
       dedupeElements(raw.map(collapseToClosestButton)).forEach((el) => safeClick(el, 'ad'));
     }
-
     if (SKIP_INTRO) {
       const raw = [...findBySelectors(introSelectors), ...findByText(introTexts)];
       dedupeElements(raw.map(collapseToClosestButton)).forEach((el) => safeClick(el, 'intro'));
