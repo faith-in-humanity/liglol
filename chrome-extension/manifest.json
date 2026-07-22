@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Auto-Skip Ads & Intro (YouTube + Anime)",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Hands-free ad skipping on YouTube and auto \"Skip Intro\" on anime sites. No network requests, no tracking.",
   "author": "faith-in-humanity",
   "content_scripts": [
@@ -9,6 +9,8 @@
       "matches": [
         "https://www.youtube.com/*",
         "https://youtube.com/*",
+        "https://www.tiktok.com/*",
+        "https://tiktok.com/*",
         "https://jut.su/*",
         "https://animego.org/*",
         "https://anilibria.tv/*",
