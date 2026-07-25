@@ -126,15 +126,23 @@
     return rect.width > 0 && rect.height > 0;
   }
 
+  // YouTube: two states driven by the ad class on #movie_player.
+  //   ad present -> mute + 16x + seek to end (+ best-effort Skip click);
+  //                 if the ad is frozen (media blocked), reload it ad-free;
+  //   ad gone    -> restore speed and mute state.
   const AD_RATE = 16.0;
   const RELOAD_AFTER_MS = 500;
-  const RELOAD_LIMIT = 3;
+  const RELOAD_LIMIT = 6;
   const RELOAD_WINDOW_MS = 60000;
+  const RELOAD_MIN_GAP_MS = 6000;
   const POST_AD_WATCH_MS = 20000;
   const STALL_MS = 1500;
   const NUDGE_COOLDOWN_MS = 4000;
-  const REWIND_S = 2;
-  const TRACK_GAP_CAP_S = 3;
+  const REWIND_S = 0.7;
+  const TRACK_GAP_CAP_S = 2.5;
+  const BREAK_GRACE_MS = 900;
+  const TRACK_TICK_MS = 100;
+  const SEEK_FIX_MS = 10000;
   const AD_CLASSES = ['ad-showing', 'ad-interrupting'];
   const SKIP_BUTTON_SELECTOR = '.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button';
   let ytAdActive = false;
@@ -151,7 +159,13 @@
   let lastContentVideoId = null;
   let lastContentTime = 0;
   let lastContentSavedAt = 0;
+  let ytAdGoneAt = 0;
+  let ytLastReloadAt = 0;
+  let ytSeekTarget = null;
+  let ytSeekFixUntil = 0;
+  let lastContentPlaying = false;
 
+  // --- TikTok: detect sponsored / promoted videos and scroll past them ---
   const TT_AD_LABELS = ['sponsored', 'реклама', 'promoted', 'gesponsert', 'sponsorisé', 'patrocinado', 'sponsorizzato', 'sponsorlu', '广告', '광고'];
   const TT_SKIP_COOLDOWN_MS = 2500;
   let ttLastSkipAt = 0;
@@ -179,10 +193,14 @@
     if (!SKIP_ADS) return;
     const now = Date.now();
     if (now - ttLastSkipAt < TT_SKIP_COOLDOWN_MS) return;
+
     if (!isTiktokAdVisible()) return;
     ttLastSkipAt = now;
     log('TikTok sponsored video — scrolling past');
-    const downBtn = document.querySelector('button[data-e2e="arrow-right"], button[data-e2e="arrow-down"]');
+
+    const downBtn = document.querySelector(
+      'button[data-e2e="arrow-right"], button[data-e2e="arrow-down"]'
+    );
     if (downBtn && isElementClickable(downBtn)) {
       safeClick(downBtn, 'tt-next');
     } else {
@@ -201,8 +219,10 @@
   function handleYoutubeAd() {
     const player = document.getElementById('movie_player');
     if (!player) return;
+
     const adShowing = AD_CLASSES.some((c) => player.classList.contains(c));
     const video = getYoutubeVideo(player);
+
     if (adShowing && SKIP_ADS) {
       const now = Date.now();
       if (!ytAdActive) {
@@ -210,11 +230,13 @@
         ytAdStartedAt = now;
         ytAdProgressAt = now;
         ytAdSeenTime = -1;
-        ytReloadedThisBreak = false;
+        ytAdGoneAt = 0;
         ytSavedMuted = video ? video.muted : false;
         log('Ad mode ON');
       }
+
       player.querySelectorAll(SKIP_BUTTON_SELECTOR).forEach((b) => safeClick(b, 'yt-skip'));
+
       if (video) {
         if (!video.muted) video.muted = true;
         if (video.playbackRate !== AD_RATE) video.playbackRate = AD_RATE;
@@ -224,40 +246,88 @@
           if (p && p.catch) p.catch(() => {});
         }
       }
+
+      // A frozen ad (media blocked upstream) never advances and can't be seeked
+      // past; a normal ad advances at 16x and the seek finishes it. When frozen,
+      // reload the same video — it comes back without the ad break.
       const t = video ? video.currentTime : 0;
       if (t !== ytAdSeenTime) { ytAdSeenTime = t; ytAdProgressAt = now; }
       const frozen = now - ytAdProgressAt > RELOAD_AFTER_MS;
       const durationBad = !video || !isFinite(video.duration) || video.duration <= 0;
-      if (!ytReloadedThisBreak && now - ytAdStartedAt > RELOAD_AFTER_MS && (frozen || durationBad)) {
-        ytReloadedThisBreak = true;
+      const reloadReady =
+        !ytReloadedThisBreak &&
+        now - ytAdStartedAt > RELOAD_AFTER_MS &&
+        now - ytLastReloadAt > RELOAD_MIN_GAP_MS;
+      if (reloadReady && (frozen || durationBad)) {
         ytReloadTimes = ytReloadTimes.filter((x) => now - x < RELOAD_WINDOW_MS);
         const id = getWatchVideoId();
         if (id && ytReloadTimes.length < RELOAD_LIMIT && typeof player.loadVideoById === 'function') {
+          ytReloadedThisBreak = true;
+          ytLastReloadAt = now;
           ytReloadTimes.push(now);
+          // Estimate the true interruption point: tracking stops a moment before
+          // the ad class appears, so add that gap back (capped), then step back
+          // REWIND_S on purpose — a small controlled rewind, never a skip forward.
           let start = 0;
           if (id === lastContentVideoId && lastContentSavedAt) {
-            const gap = Math.min(Math.max((ytAdStartedAt - lastContentSavedAt) / 1000, 0), TRACK_GAP_CAP_S);
+            const gap = lastContentPlaying
+              ? Math.min(Math.max((ytAdStartedAt - lastContentSavedAt) / 1000, 0), TRACK_GAP_CAP_S)
+              : 0;
             start = lastContentTime + gap - REWIND_S;
           }
           start = start < 2 ? 0 : Math.round(start * 10) / 10;
+          // YouTube snaps startSeconds to a media segment boundary, which can
+          // land seconds early; remember the target and fix it once playing.
+          ytSeekTarget = start > 0 ? start : null;
+          ytSeekFixUntil = now + SEEK_FIX_MS;
           log('Ad stuck — reloading video ad-free at ' + start + 's');
           try { player.loadVideoById({ videoId: id, startSeconds: start }); } catch (e) {}
         }
       }
     } else {
+      const now = Date.now();
       if (ytAdActive) {
         ytAdActive = false;
-        ytAdEndedAt = Date.now();
+        ytAdGoneAt = now;
+        ytAdEndedAt = now;
         ytStallSeenTime = -1;
-        ytStallProgressAt = Date.now();
+        ytStallProgressAt = now;
         if (video) {
           video.playbackRate = 1.0;
           video.muted = ytSavedMuted;
         }
         log('Ad mode OFF — playback restored');
       }
-      if (video && !video.paused && ytAdEndedAt && Date.now() - ytAdEndedAt < POST_AD_WATCH_MS) {
-        const now = Date.now();
+
+      // An ad pod ("1 of 4") drops the ad class for a moment between clips.
+      // Treat that flicker as the same break, so one pod cannot burn several
+      // reloads and strand the last ad.
+      if (ytReloadedThisBreak && ytAdGoneAt && now - ytAdGoneAt > BREAK_GRACE_MS) {
+        ytReloadedThisBreak = false;
+      }
+
+      // Undo a start position that YouTube snapped back to a segment boundary.
+      if (ytSeekTarget !== null) {
+        if (now >= ytSeekFixUntil) {
+          ytSeekTarget = null;
+        } else if (video && !video.paused) {
+          let cur = 0;
+          try {
+            cur = typeof player.getCurrentTime === 'function' ? player.getCurrentTime() : video.currentTime;
+          } catch (e) {}
+          if (cur > 0.1) {
+            if (cur < ytSeekTarget - 0.6) {
+              try { player.seekTo(ytSeekTarget, true); } catch (e) {}
+            }
+            ytSeekTarget = null;
+          }
+        }
+      }
+
+      // Post-ad stall watchdog: the player sometimes hangs on a black buffering
+      // screen after an ad break; a pause/play nudge unfreezes it. Never fires
+      // while the user has the video paused.
+      if (video && !video.paused && ytAdEndedAt && now - ytAdEndedAt < POST_AD_WATCH_MS) {
         const t = video.currentTime;
         if (t !== ytStallSeenTime) {
           ytStallSeenTime = t;
@@ -277,18 +347,31 @@
           } catch (e) {}
         }
       }
-      const id = getWatchVideoId();
-      if (id && typeof player.getCurrentTime === 'function') {
-        try {
-          const data = typeof player.getVideoData === 'function' ? player.getVideoData() : null;
-          if (!data || !data.video_id || data.video_id === id) {
-            lastContentVideoId = id;
-            lastContentTime = player.getCurrentTime() || 0;
-            lastContentSavedAt = Date.now();
-          }
-        } catch (e) {}
-      }
+      trackContentPosition(player);
     }
+  }
+
+  // Sampled every TRACK_TICK_MS, so the stored position is at most ~0.1 s stale
+  // when an ad cuts in. The smaller that staleness, the smaller the rewind.
+  function trackContentPosition(player) {
+    if (!player) player = document.getElementById('movie_player');
+    if (!player || typeof player.getCurrentTime !== 'function') return;
+    if (AD_CLASSES.some((c) => player.classList.contains(c))) return;
+    const id = getWatchVideoId();
+    if (!id) return;
+    try {
+      const data = typeof player.getVideoData === 'function' ? player.getVideoData() : null;
+      if (data && data.video_id && data.video_id !== id) return;
+      const t = player.getCurrentTime() || 0;
+      // A splice-in ad briefly reports a near-zero time under the content id;
+      // never let that overwrite a real position.
+      if (t <= 0.3 && lastContentVideoId === id && lastContentTime > 5) return;
+      const v = getYoutubeVideo(player);
+      lastContentPlaying = !!v && !v.paused;
+      lastContentVideoId = id;
+      lastContentTime = t;
+      lastContentSavedAt = Date.now();
+    } catch (e) {}
   }
 
   function activate(el) {
@@ -296,6 +379,7 @@
     const x = rect.left + rect.width / 2;
     const y = rect.top + rect.height / 2;
     const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+
     try { el.dispatchEvent(new PointerEvent('pointerover', opts)); } catch (e) {}
     try { el.dispatchEvent(new PointerEvent('pointerdown', opts)); } catch (e) {}
     try { el.dispatchEvent(new PointerEvent('pointerup', opts)); } catch (e) {}
@@ -305,6 +389,7 @@
     try { el.click(); } catch (e) {}
   }
 
+  // Never auto-click a link that downloads a file or leaves the current site.
   function isSafeToAutoClick(el) {
     const anchor = el && el.closest ? el.closest('a[href]') : null;
     if (!anchor) return true;
@@ -322,9 +407,11 @@
     const target = resolveClickTarget(el);
     if (!isElementClickable(target)) return false;
     if (!isSafeToAutoClick(target)) return false;
+
     const now = Date.now();
     if (now - (lastClickAt.get(target) || 0) < CLICK_COOLDOWN_MS) return false;
     lastClickAt.set(target, now);
+
     try {
       activate(target);
       log('Clicked: ' + label);
@@ -386,14 +473,17 @@
       handleYoutubeAd();
       return;
     }
+
     if (isTiktok) {
       handleTiktokAd();
       return;
     }
+
     if (SKIP_ADS) {
       const raw = [...findBySelectors(adSelectors), ...findByText(adTexts)];
       dedupeElements(raw.map(collapseToClosestButton)).forEach((el) => safeClick(el, 'ad'));
     }
+
     if (SKIP_INTRO) {
       const raw = [...findBySelectors(introSelectors), ...findByText(introTexts)];
       dedupeElements(raw.map(collapseToClosestButton)).forEach((el) => safeClick(el, 'intro'));
@@ -419,4 +509,5 @@
 
   tryAutoSkip();
   setInterval(tryAutoSkip, 300);
+  if (isYoutube) setInterval(() => trackContentPosition(), TRACK_TICK_MS);
 })();
