@@ -134,13 +134,16 @@
   const RELOAD_AFTER_MS = 500;
   const RELOAD_LIMIT = 6;
   const RELOAD_WINDOW_MS = 60000;
-  const RELOAD_MIN_GAP_MS = 6000;
+  // Growing gaps between reloads. A reload can land straight on another frozen
+  // ad, so the script must keep trying — just never in a tight loop.
+  const RELOAD_BACKOFF_MS = [0, 2000, 5000, 9000];
+  const RELOAD_COOLDOWN_MS = 15000;
+  const CLEAN_CONTENT_MS = 5000;
   const POST_AD_WATCH_MS = 20000;
   const STALL_MS = 1500;
   const NUDGE_COOLDOWN_MS = 4000;
   const REWIND_S = 0.7;
   const TRACK_GAP_CAP_S = 2.5;
-  const BREAK_GRACE_MS = 900;
   const TRACK_TICK_MS = 100;
   const SEEK_FIX_MS = 10000;
   const AD_CLASSES = ['ad-showing', 'ad-interrupting'];
@@ -150,7 +153,7 @@
   let ytAdStartedAt = 0;
   let ytAdSeenTime = -1;
   let ytAdProgressAt = 0;
-  let ytReloadedThisBreak = false;
+  let ytReloadStreak = 0;
   let ytReloadTimes = [];
   let ytAdEndedAt = 0;
   let ytStallSeenTime = -1;
@@ -254,15 +257,17 @@
       if (t !== ytAdSeenTime) { ytAdSeenTime = t; ytAdProgressAt = now; }
       const frozen = now - ytAdProgressAt > RELOAD_AFTER_MS;
       const durationBad = !video || !isFinite(video.duration) || video.duration <= 0;
+      ytReloadTimes = ytReloadTimes.filter((x) => now - x < RELOAD_WINDOW_MS);
+      const backoff = ytReloadTimes.length >= RELOAD_LIMIT
+        ? RELOAD_COOLDOWN_MS
+        : RELOAD_BACKOFF_MS[Math.min(ytReloadStreak, RELOAD_BACKOFF_MS.length - 1)];
       const reloadReady =
-        !ytReloadedThisBreak &&
         now - ytAdStartedAt > RELOAD_AFTER_MS &&
-        now - ytLastReloadAt > RELOAD_MIN_GAP_MS;
+        now - ytLastReloadAt >= backoff;
       if (reloadReady && (frozen || durationBad)) {
-        ytReloadTimes = ytReloadTimes.filter((x) => now - x < RELOAD_WINDOW_MS);
         const id = getWatchVideoId();
-        if (id && ytReloadTimes.length < RELOAD_LIMIT && typeof player.loadVideoById === 'function') {
-          ytReloadedThisBreak = true;
+        if (id && typeof player.loadVideoById === 'function') {
+          ytReloadStreak++;
           ytLastReloadAt = now;
           ytReloadTimes.push(now);
           // Estimate the true interruption point: tracking stops a moment before
@@ -299,11 +304,10 @@
         log('Ad mode OFF — playback restored');
       }
 
-      // An ad pod ("1 of 4") drops the ad class for a moment between clips.
-      // Treat that flicker as the same break, so one pod cannot burn several
-      // reloads and strand the last ad.
-      if (ytReloadedThisBreak && ytAdGoneAt && now - ytAdGoneAt > BREAK_GRACE_MS) {
-        ytReloadedThisBreak = false;
+      // Once real content has played for a while, the last reload clearly
+      // worked; start the next break from a zero delay again.
+      if (ytReloadStreak && ytAdGoneAt && now - ytAdGoneAt > CLEAN_CONTENT_MS) {
+        ytReloadStreak = 0;
       }
 
       // Undo a start position that YouTube snapped back to a segment boundary.
