@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto-Skip Ads & Intro (YouTube + Anime sites)
 // @namespace    local.autoskip
-// @version      1.0.0-beta.7
+// @version      1.0.0-beta.8
 // @description  Hands-free ad skipping on YouTube and auto "Skip Intro" on anime sites
 // @author       faith-in-humanity
 // @license      MIT
@@ -31,6 +31,7 @@
   // Feature switches. Whole-script on/off lives in the Userscripts toolbar icon.
   const SKIP_ADS = true;
   const SKIP_INTRO = true;
+  const MAX_QUALITY = true;
   const DEBUG = false;
 
   function log(msg) {
@@ -194,6 +195,10 @@
   let ytSeekTarget = null;
   let ytSeekFixUntil = 0;
   let lastContentPlaying = false;
+  let ytQualitySetForVideo = null;
+  let ytQualityAttemptsVideoId = null;
+  let ytQualityAttempts = 0;
+  let ytQualityLastAttemptAt = 0;
 
   // --- TikTok: detect sponsored / promoted videos and scroll past them ---
   const TT_AD_LABELS = ['sponsored', 'реклама', 'promoted', 'gesponsert', 'sponsorisé', 'patrocinado', 'sponsorizzato', 'sponsorlu', '广告', '광고'];
@@ -379,6 +384,7 @@
         }
       }
       trackContentPosition(player);
+      ensureMaxQuality(player);
     }
   }
 
@@ -403,6 +409,72 @@
       lastContentTime = t;
       lastContentSavedAt = Date.now();
     } catch (e) {}
+  }
+
+  // YouTube ignores player.setPlaybackQuality() on the watch page (confirmed
+  // live: calling it leaves getPlaybackQuality() unchanged). The only thing
+  // that actually works is driving the real settings menu, same trick as the
+  // Skip button would need if it accepted synthetic clicks — except here
+  // synthetic clicks DO work (verified live: gear -> Quality -> top item
+  // reliably switches getPlaybackQuality() to the top resolution).
+  const QUALITY_MENU_WORDS = ['quality', 'качество', 'qualität', 'calidad', 'qualité', 'qualità', 'jakość', 'kalite', '画質', '화질', '画质'];
+  const QUALITY_MAX_ATTEMPTS = 5;
+  const QUALITY_ATTEMPT_COOLDOWN_MS = 1500;
+
+  function findMenuItemByWords(root, words) {
+    const items = [...root.querySelectorAll('.ytp-menuitem')];
+    return items.find((it) => {
+      const label = it.querySelector('.ytp-menuitem-label') || it;
+      const text = (label.textContent || '').trim().toLowerCase();
+      return words.some((w) => text.includes(w));
+    }) || null;
+  }
+
+  function ensureMaxQuality(player) {
+    if (!MAX_QUALITY || !player) return;
+    if (AD_CLASSES.some((c) => player.classList.contains(c))) return;
+    if (typeof player.getPlaybackQuality !== 'function' || typeof player.getAvailableQualityLevels !== 'function') return;
+
+    const id = getWatchVideoId();
+    if (!id || id === ytQualitySetForVideo) return;
+
+    if (ytQualityAttemptsVideoId !== id) {
+      ytQualityAttemptsVideoId = id;
+      ytQualityAttempts = 0;
+    }
+    if (ytQualityAttempts >= QUALITY_MAX_ATTEMPTS) { ytQualitySetForVideo = id; return; }
+
+    let levels, current;
+    try { levels = player.getAvailableQualityLevels(); current = player.getPlaybackQuality(); }
+    catch (e) { return; }
+    if (!levels || !levels.length) return; // metadata not ready yet — retry later, don't burn an attempt
+
+    const best = levels.find((l) => l !== 'auto');
+    if (!best) return;
+    if (current === best) { ytQualitySetForVideo = id; return; }
+
+    const now = Date.now();
+    if (now - ytQualityLastAttemptAt < QUALITY_ATTEMPT_COOLDOWN_MS) return;
+
+    const gear = player.querySelector('.ytp-settings-button');
+    if (!gear || !isElementClickable(gear)) return;
+
+    ytQualityAttempts++;
+    ytQualityLastAttemptAt = now;
+
+    activate(gear);
+    const menu = document.querySelector('.ytp-settings-menu');
+    if (!menu) return;
+    // Quality is normally the last entry in the top-level settings panel;
+    // fall back to that position if the localized label isn't recognized.
+    const qualityItem = findMenuItemByWords(menu, QUALITY_MENU_WORDS) ||
+      [...menu.querySelectorAll('.ytp-menuitem')].pop();
+    if (!qualityItem) { activate(gear); return; }
+    activate(qualityItem);
+
+    const radios = [...document.querySelectorAll('.ytp-menuitem[role="menuitemradio"]')];
+    if (!radios.length) return;
+    activate(radios[0]); // resolutions are listed highest-first, Auto last
   }
 
   function activate(el) {
