@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto-Skip Ads & Intro (YouTube + Anime sites)
 // @namespace    local.autoskip
-// @version      1.0.0-beta.8
+// @version      1.0.0-beta.9
 // @description  Hands-free ad skipping on YouTube and auto "Skip Intro" on anime sites
 // @author       faith-in-humanity
 // @license      MIT
@@ -430,6 +430,22 @@
     }) || null;
   }
 
+  const RESOLUTION_RADIO_RE = /^(2160|1440|1080|720|480|360|240|144)p/;
+
+  // The settings panel remembers which submenu was open last time it was
+  // closed, so a fresh gear click doesn't reliably land on the top-level
+  // menu. Every step below is verified against the actual DOM before the
+  // next click fires; any mismatch backs out instead of clicking blind —
+  // a wrong click here could just as easily land on playback speed or
+  // captions as on quality, and there is no way to tell without checking.
+  function closeSettingsMenu(player) {
+    const menu = document.querySelector('.ytp-settings-menu');
+    if (menu && player) {
+      const gear = player.querySelector('.ytp-settings-button');
+      if (gear) activate(gear);
+    }
+  }
+
   function ensureMaxQuality(player) {
     if (!MAX_QUALITY || !player) return;
     if (AD_CLASSES.some((c) => player.classList.contains(c))) return;
@@ -458,22 +474,27 @@
 
     const gear = player.querySelector('.ytp-settings-button');
     if (!gear || !isElementClickable(gear)) return;
+    if (document.querySelector('.ytp-settings-menu')) return; // already open — don't fight it, wait
 
     ytQualityAttempts++;
     ytQualityLastAttemptAt = now;
 
     activate(gear);
     const menu = document.querySelector('.ytp-settings-menu');
-    if (!menu) return;
-    // Quality is normally the last entry in the top-level settings panel;
-    // fall back to that position if the localized label isn't recognized.
-    const qualityItem = findMenuItemByWords(menu, QUALITY_MENU_WORDS) ||
-      [...menu.querySelectorAll('.ytp-menuitem')].pop();
-    if (!qualityItem) { activate(gear); return; }
+    if (!menu) return; // menu never opened — nothing was clicked, safe no-op
+
+    const qualityItem = findMenuItemByWords(menu, QUALITY_MENU_WORDS);
+    // No blind fallback: if the label can't be confirmed as Quality, back
+    // out via the gear instead of guessing at a menu item.
+    if (!qualityItem) { closeSettingsMenu(player); return; }
     activate(qualityItem);
 
-    const radios = [...document.querySelectorAll('.ytp-menuitem[role="menuitemradio"]')];
-    if (!radios.length) return;
+    const radios = [...document.querySelectorAll('.ytp-menuitem[role="menuitemradio"]')]
+      .filter((r) => isElementClickable(r));
+    const looksLikeQuality = radios.length >= 2 &&
+      (RESOLUTION_RADIO_RE.test(radios[0].textContent.trim()) ||
+       radios.some((r) => /auto/i.test(r.textContent)));
+    if (!looksLikeQuality) { closeSettingsMenu(player); return; }
     activate(radios[0]); // resolutions are listed highest-first, Auto last
   }
 
