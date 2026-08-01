@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto-Skip Ads & Intro (YouTube + Anime sites)
 // @namespace    local.autoskip
-// @version      1.0.0-beta.9
+// @version      1.0.0-beta.10
 // @description  Hands-free ad skipping on YouTube and auto "Skip Intro" on anime sites
 // @author       faith-in-humanity
 // @license      MIT
@@ -11,6 +11,7 @@
 // @match        https://tiktok.com/*
 // @match        https://jut.su/*
 // @match        https://animego.org/*
+// @match        https://animego.me/*
 // @match        https://anilibria.tv/*
 // @match        https://animevost.org/*
 // @match        https://2anime.ru/*
@@ -32,6 +33,7 @@
   const SKIP_ADS = true;
   const SKIP_INTRO = true;
   const MAX_QUALITY = true;
+  const CLOSE_POPUPS = true;
   const DEBUG = false;
 
   function log(msg) {
@@ -65,7 +67,7 @@
       intro: { selectors: [], texts: ['Пропустить интро', 'Skip Intro', 'Пропустить опенинг'] },
     },
     {
-      hostnames: ['animego.org'],
+      hostnames: ['animego.org', 'animego.me'],
       ad: { selectors: [], texts: ['Пропустить рекламу', 'Пропустить', 'Skip Ad', 'Skip'] },
       intro: { selectors: [], texts: ['Пропустить интро', 'Skip Intro'] },
     },
@@ -498,6 +500,46 @@
     activate(radios[0]); // resolutions are listed highest-first, Auto last
   }
 
+  // Dialogs are riskier to auto-click than a Skip button: a blind click could
+  // accept terms or grant consent. So only dialogs identified by BOTH their own
+  // element tag and their text are touched, consent/cookie prompts are skipped
+  // entirely, and on promos the dismiss control is used — never the accept one.
+  const POPUP_CONFIRM_TEXTS = [
+    'still watching', 'still listening', 'continue watching', 'video paused',
+    'вы ещё смотрите', 'вы еще смотрите', 'продолжить просмотр', 'видео приостановлено',
+  ];
+  const CONSENT_SELECTOR =
+    'ytd-consent-bump-v2-lightbox, ytd-consent-bump-lightbox, ytd-consent-bump-renderer';
+  const CONFIRM_DIALOG_SELECTOR =
+    'yt-confirm-dialog-renderer, ytmusic-confirm-dialog-renderer';
+
+  function dismissYoutubePopups() {
+    if (!CLOSE_POPUPS) return;
+    // A consent prompt on screen means hands off everything: declining or
+    // accepting cookies is the user's call, never the script's.
+    if (document.querySelector(CONSENT_SELECTOR)) return;
+
+    const dialog = document.querySelector(CONFIRM_DIALOG_SELECTOR);
+    if (dialog && isElementClickable(dialog)) {
+      const text = (dialog.textContent || '').toLowerCase();
+      if (POPUP_CONFIRM_TEXTS.some((t) => text.includes(t))) {
+        const btn = dialog.querySelector('#confirm-button button') ||
+          dialog.querySelector('#confirm-button') ||
+          dialog.querySelector('button.yt-spec-button-shape-next--call-to-action');
+        if (btn) { safeClick(btn, 'yt-keep-playing'); return; }
+      }
+    }
+
+    // Premium upsell bar: only the dismiss control, so the offer is refused
+    // rather than accidentally accepted.
+    const promo = document.querySelector('ytd-mealbar-promo-renderer');
+    if (promo && isElementClickable(promo)) {
+      const dismiss = promo.querySelector('#dismiss-button button') ||
+        promo.querySelector('#dismiss-button');
+      if (dismiss) safeClick(dismiss, 'yt-promo-dismiss');
+    }
+  }
+
   function activate(el) {
     const rect = el.getBoundingClientRect();
     const x = rect.left + rect.width / 2;
@@ -595,6 +637,7 @@
   function tryAutoSkip() {
     if (isYoutube) {
       handleYoutubeAd();
+      dismissYoutubePopups();
       return;
     }
 
