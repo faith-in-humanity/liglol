@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto-Skip Ads & Intro (YouTube + Anime sites)
 // @namespace    local.autoskip
-// @version      1.0.0-beta.10
+// @version      1.0.0-beta.11
 // @description  Hands-free ad skipping on YouTube and auto "Skip Intro" on anime sites
 // @author       faith-in-humanity
 // @license      MIT
@@ -156,19 +156,17 @@
     return rect.width > 0 && rect.height > 0;
   }
 
-  // YouTube: two states driven by the ad class on #movie_player.
-  //   ad present -> mute + 16x + seek to end (+ best-effort Skip click);
-  //                 if the ad is frozen (media blocked), reload it ad-free;
-  //   ad gone    -> restore speed and mute state.
+  // Ad state is driven by the ad class on #movie_player.
   const AD_RATE = 16.0;
   const RELOAD_AFTER_MS = 500;
   const RELOAD_LIMIT = 6;
   const RELOAD_WINDOW_MS = 60000;
-  // Growing gaps between reloads. A reload can land straight on another frozen
-  // ad, so the script must keep trying — just never in a tight loop.
+  // Reload can land on another frozen ad, so retry with growing gaps.
   const RELOAD_BACKOFF_MS = [0, 2000, 5000, 9000];
   const RELOAD_COOLDOWN_MS = 15000;
   const CLEAN_CONTENT_MS = 5000;
+  // YouTube often blocks seek-to-end, so a long ad crawls at 16x. Stop waiting.
+  const AD_HARD_LIMIT_MS = 1800;
   const POST_AD_WATCH_MS = 20000;
   const STALL_MS = 1500;
   const NUDGE_COOLDOWN_MS = 4000;
@@ -284,13 +282,12 @@
         }
       }
 
-      // A frozen ad (media blocked upstream) never advances and can't be seeked
-      // past; a normal ad advances at 16x and the seek finishes it. When frozen,
-      // reload the same video — it comes back without the ad break.
+      // Frozen ad can't be seeked past; reload returns the video ad-free.
       const t = video ? video.currentTime : 0;
       if (t !== ytAdSeenTime) { ytAdSeenTime = t; ytAdProgressAt = now; }
       const frozen = now - ytAdProgressAt > RELOAD_AFTER_MS;
       const durationBad = !video || !isFinite(video.duration) || video.duration <= 0;
+      const dragging = now - ytAdStartedAt > AD_HARD_LIMIT_MS;
       ytReloadTimes = ytReloadTimes.filter((x) => now - x < RELOAD_WINDOW_MS);
       const backoff = ytReloadTimes.length >= RELOAD_LIMIT
         ? RELOAD_COOLDOWN_MS
@@ -298,15 +295,13 @@
       const reloadReady =
         now - ytAdStartedAt > RELOAD_AFTER_MS &&
         now - ytLastReloadAt >= backoff;
-      if (reloadReady && (frozen || durationBad)) {
+      if (reloadReady && (frozen || durationBad || dragging)) {
         const id = getWatchVideoId();
         if (id && typeof player.loadVideoById === 'function') {
           ytReloadStreak++;
           ytLastReloadAt = now;
           ytReloadTimes.push(now);
-          // Estimate the true interruption point: tracking stops a moment before
-          // the ad class appears, so add that gap back (capped), then step back
-          // REWIND_S on purpose — a small controlled rewind, never a skip forward.
+          // Add back the untracked gap, then rewind slightly. Never skip forward.
           let start = 0;
           if (id === lastContentVideoId && lastContentSavedAt) {
             const gap = lastContentPlaying
@@ -315,8 +310,7 @@
             start = lastContentTime + gap - REWIND_S;
           }
           start = start < 2 ? 0 : Math.round(start * 10) / 10;
-          // YouTube snaps startSeconds to a media segment boundary, which can
-          // land seconds early; remember the target and fix it once playing.
+          // YouTube snaps startSeconds to a segment boundary; corrected once playing.
           ytSeekTarget = start > 0 ? start : null;
           ytSeekFixUntil = now + SEEK_FIX_MS;
           log('Ad stuck — reloading video ad-free at ' + start + 's');
@@ -338,8 +332,7 @@
         log('Ad mode OFF — playback restored');
       }
 
-      // Once real content has played for a while, the last reload clearly
-      // worked; start the next break from a zero delay again.
+      // Content played clean, so the last reload worked: reset the backoff.
       if (ytReloadStreak && ytAdGoneAt && now - ytAdGoneAt > CLEAN_CONTENT_MS) {
         ytReloadStreak = 0;
       }
@@ -362,9 +355,7 @@
         }
       }
 
-      // Post-ad stall watchdog: the player sometimes hangs on a black buffering
-      // screen after an ad break; a pause/play nudge unfreezes it. Never fires
-      // while the user has the video paused.
+      // Player sometimes hangs after an ad break; a pause/play nudge unfreezes it.
       if (video && !video.paused && ytAdEndedAt && now - ytAdEndedAt < POST_AD_WATCH_MS) {
         const t = video.currentTime;
         if (t !== ytStallSeenTime) {
@@ -390,8 +381,7 @@
     }
   }
 
-  // Sampled every TRACK_TICK_MS, so the stored position is at most ~0.1 s stale
-  // when an ad cuts in. The smaller that staleness, the smaller the rewind.
+  // Sampled often: the fresher the stored position, the smaller the rewind.
   function trackContentPosition(player) {
     if (!player) player = document.getElementById('movie_player');
     if (!player || typeof player.getCurrentTime !== 'function') return;
@@ -402,8 +392,7 @@
       const data = typeof player.getVideoData === 'function' ? player.getVideoData() : null;
       if (data && data.video_id && data.video_id !== id) return;
       const t = player.getCurrentTime() || 0;
-      // A splice-in ad briefly reports a near-zero time under the content id;
-      // never let that overwrite a real position.
+      // A splice-in ad reports a near-zero time; don't overwrite a real position.
       if (t <= 0.3 && lastContentVideoId === id && lastContentTime > 5) return;
       const v = getYoutubeVideo(player);
       lastContentPlaying = !!v && !v.paused;
@@ -413,12 +402,7 @@
     } catch (e) {}
   }
 
-  // YouTube ignores player.setPlaybackQuality() on the watch page (confirmed
-  // live: calling it leaves getPlaybackQuality() unchanged). The only thing
-  // that actually works is driving the real settings menu, same trick as the
-  // Skip button would need if it accepted synthetic clicks — except here
-  // synthetic clicks DO work (verified live: gear -> Quality -> top item
-  // reliably switches getPlaybackQuality() to the top resolution).
+  // setPlaybackQuality() is ignored by YouTube; only the settings menu works.
   const QUALITY_MENU_WORDS = ['quality', 'качество', 'qualität', 'calidad', 'qualité', 'qualità', 'jakość', 'kalite', '画質', '화질', '画质'];
   const QUALITY_MAX_ATTEMPTS = 5;
   const QUALITY_ATTEMPT_COOLDOWN_MS = 1500;
@@ -434,12 +418,7 @@
 
   const RESOLUTION_RADIO_RE = /^(2160|1440|1080|720|480|360|240|144)p/;
 
-  // The settings panel remembers which submenu was open last time it was
-  // closed, so a fresh gear click doesn't reliably land on the top-level
-  // menu. Every step below is verified against the actual DOM before the
-  // next click fires; any mismatch backs out instead of clicking blind —
-  // a wrong click here could just as easily land on playback speed or
-  // captions as on quality, and there is no way to tell without checking.
+  // The panel reopens on its last submenu, so verify every step before clicking.
   function closeSettingsMenu(player) {
     const menu = document.querySelector('.ytp-settings-menu');
     if (menu && player) {
@@ -486,8 +465,7 @@
     if (!menu) return; // menu never opened — nothing was clicked, safe no-op
 
     const qualityItem = findMenuItemByWords(menu, QUALITY_MENU_WORDS);
-    // No blind fallback: if the label can't be confirmed as Quality, back
-    // out via the gear instead of guessing at a menu item.
+    // No blind fallback: unconfirmed label means back out, never guess.
     if (!qualityItem) { closeSettingsMenu(player); return; }
     activate(qualityItem);
 
@@ -500,10 +478,7 @@
     activate(radios[0]); // resolutions are listed highest-first, Auto last
   }
 
-  // Dialogs are riskier to auto-click than a Skip button: a blind click could
-  // accept terms or grant consent. So only dialogs identified by BOTH their own
-  // element tag and their text are touched, consent/cookie prompts are skipped
-  // entirely, and on promos the dismiss control is used — never the accept one.
+  // Dialogs need tag AND text to match: a blind click could accept terms.
   const POPUP_CONFIRM_TEXTS = [
     'still watching', 'still listening', 'continue watching', 'video paused',
     'вы ещё смотрите', 'вы еще смотрите', 'продолжить просмотр', 'видео приостановлено',
@@ -515,8 +490,7 @@
 
   function dismissYoutubePopups() {
     if (!CLOSE_POPUPS) return;
-    // A consent prompt on screen means hands off everything: declining or
-    // accepting cookies is the user's call, never the script's.
+    // Cookie choices belong to the user, so a visible consent prompt means stop.
     if (document.querySelector(CONSENT_SELECTOR)) return;
 
     const dialog = document.querySelector(CONFIRM_DIALOG_SELECTOR);
@@ -530,8 +504,7 @@
       }
     }
 
-    // Premium upsell bar: only the dismiss control, so the offer is refused
-    // rather than accidentally accepted.
+    // Dismiss only, so the offer is never accidentally accepted.
     const promo = document.querySelector('ytd-mealbar-promo-renderer');
     if (promo && isElementClickable(promo)) {
       const dismiss = promo.querySelector('#dismiss-button button') ||
