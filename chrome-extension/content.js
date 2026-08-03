@@ -275,13 +275,32 @@
           ytReloadTimes.push(now);
           // Add back the untracked gap, then rewind slightly. Never skip forward.
           let start = 0;
-          if (id === lastContentVideoId && lastContentSavedAt) {
+          let src = 'tracked';
+          // getProgressState() reports content progress and survives the ad
+          // swap, so trust it over a sample that may already be stale.
+          let live = null;
+          try {
+            const ps = typeof player.getProgressState === 'function' ? player.getProgressState() : null;
+            if (ps && isFinite(ps.current) && ps.current > 1 &&
+                isFinite(ps.duration) && ps.duration > 60 && ps.current < ps.duration) {
+              live = ps.current;
+            }
+          } catch (e) {}
+          if (live !== null && (!lastContentTime || live >= lastContentTime - 1)) {
+            start = live - REWIND_S;
+            src = 'progress';
+          } else if (id === lastContentVideoId && lastContentSavedAt) {
             const gap = lastContentPlaying
               ? Math.min(Math.max((ytAdStartedAt - lastContentSavedAt) / 1000, 0), TRACK_GAP_CAP_S)
               : 0;
             start = lastContentTime + gap - REWIND_S;
           }
           start = start < 2 ? 0 : Math.round(start * 10) / 10;
+          console.log('[AutoSkip] reload src=' + src + ' start=' + start.toFixed(1) +
+            ' tracked=' + lastContentTime.toFixed(1) +
+            ' staleMs=' + (ytAdStartedAt - lastContentSavedAt) +
+            ' live=' + (live === null ? 'n/a' : live.toFixed(1)) +
+            ' adMs=' + (now - ytAdStartedAt));
           // YouTube snaps startSeconds to a segment boundary; corrected once playing.
           ytSeekTarget = start > 0 ? start : null;
           ytSeekFixUntil = now + SEEK_FIX_MS;
