@@ -134,11 +134,14 @@
   const RELOAD_LIMIT = 6;
   const RELOAD_WINDOW_MS = 60000;
   // Reload can land on another frozen ad, so retry with growing gaps.
-  const RELOAD_BACKOFF_MS = [0, 2000, 5000, 9000];
+  const RELOAD_BACKOFF_MS = [0, 400, 3000, 9000];
   const RELOAD_COOLDOWN_MS = 15000;
   const CLEAN_CONTENT_MS = 5000;
   // YouTube often blocks seek-to-end, so a long ad crawls at 16x. Stop waiting.
-  const AD_HARD_LIMIT_MS = 1800;
+  const AD_HARD_LIMIT_MS = 900;
+  // If the seek-to-end was refused the ad will never end on its own, so detect
+  // that directly instead of waiting out the hard limit.
+  const SEEK_PROBE_MS = 250;
   const POST_AD_WATCH_MS = 20000;
   const STALL_MS = 1500;
   const NUDGE_COOLDOWN_MS = 4000;
@@ -260,14 +263,16 @@
       const frozen = now - ytAdProgressAt > RELOAD_AFTER_MS;
       const durationBad = !video || !isFinite(video.duration) || video.duration <= 0;
       const dragging = now - ytAdStartedAt > AD_HARD_LIMIT_MS;
+      const seekRefused = video && isFinite(video.duration) && video.duration > 1 &&
+        now - ytAdStartedAt > SEEK_PROBE_MS && video.currentTime < video.duration - 2;
       ytReloadTimes = ytReloadTimes.filter((x) => now - x < RELOAD_WINDOW_MS);
       const backoff = ytReloadTimes.length >= RELOAD_LIMIT
         ? RELOAD_COOLDOWN_MS
         : RELOAD_BACKOFF_MS[Math.min(ytReloadStreak, RELOAD_BACKOFF_MS.length - 1)];
       const reloadReady =
-        now - ytAdStartedAt > RELOAD_AFTER_MS &&
+        now - ytAdStartedAt > SEEK_PROBE_MS &&
         now - ytLastReloadAt >= backoff;
-      if (reloadReady && (frozen || durationBad || dragging)) {
+      if (reloadReady && (frozen || durationBad || dragging || seekRefused)) {
         const id = getWatchVideoId();
         if (id && typeof player.loadVideoById === 'function') {
           ytReloadStreak++;
