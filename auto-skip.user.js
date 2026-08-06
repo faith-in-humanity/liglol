@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto-Skip Ads & Intro (YouTube + Anime sites)
 // @namespace    local.autoskip
-// @version      1.0.0-beta.14
+// @version      1.0.0-beta.17
 // @description  Hands-free ad skipping on YouTube and auto "Skip Intro" on anime sites
 // @author       faith-in-humanity
 // @license      MIT
@@ -10,12 +10,16 @@
 // @match        https://www.tiktok.com/*
 // @match        https://tiktok.com/*
 // @match        https://jut.su/*
+// @match        https://*.jut.su/*
+// @include      /^https:\/\/[a-z0-9-]+-jut\.su\//
 // @match        https://animego.org/*
 // @match        https://animego.me/*
 // @match        https://anilibria.tv/*
 // @match        https://animevost.org/*
 // @match        https://2anime.ru/*
 // @match        https://yummyanime.tv/*
+// @match        https://yummyani.me/*
+// @match        https://*.yummyani.me/*
 // @match        https://gogoanime.run/*
 // @match        https://gogoanime.sk/*
 // @match        https://9anime.to/*
@@ -34,6 +38,7 @@
   const SKIP_INTRO = true;
   const MAX_QUALITY = true;
   const CLOSE_POPUPS = true;
+  const CLOSE_BANNERS = true;
   const DEBUG = false;
 
   function log(msg) {
@@ -63,6 +68,7 @@
     },
     {
       hostnames: ['jut.su'],
+      hostSuffix: '-jut.su',
       ad: { selectors: [], texts: ['Пропустить рекламу', 'Пропустить', 'Skip Ad', 'Skip'] },
       intro: { selectors: [], texts: ['Пропустить интро', 'Skip Intro', 'Пропустить опенинг'] },
     },
@@ -87,7 +93,7 @@
       intro: { selectors: [], texts: ['Пропустить интро', 'Skip Intro'] },
     },
     {
-      hostnames: ['yummyanime.tv'],
+      hostnames: ['yummyanime.tv', 'yummyani.me', 'old.yummyani.me'],
       ad: { selectors: [], texts: ['Пропустить рекламу', 'Пропустить', 'Skip Ad', 'Skip'] },
       intro: { selectors: [], texts: ['Пропустить интро', 'Skip Intro'] },
     },
@@ -128,7 +134,8 @@
 
   const currentHost = location.hostname.replace(/^www\./, '');
   const siteConfig = SITE_CONFIGS.find((cfg) =>
-    cfg.hostnames.some((h) => currentHost === h || currentHost.endsWith('.' + h))
+    cfg.hostnames.some((h) => currentHost === h || currentHost.endsWith('.' + h)) ||
+    (cfg.hostSuffix && currentHost.endsWith(cfg.hostSuffix))
   );
   const isYoutube = currentHost === 'youtube.com';
   const isTiktok = currentHost === 'tiktok.com';
@@ -202,6 +209,7 @@
   let ytQualityAttemptsVideoId = null;
   let ytQualityAttempts = 0;
   let ytQualityLastAttemptAt = 0;
+  let ytContentDuration = 0;
 
   // --- TikTok: detect sponsored / promoted videos and scroll past them ---
   const TT_AD_LABELS = ['sponsored', 'реклама', 'promoted', 'gesponsert', 'sponsorisé', 'patrocinado', 'sponsorizzato', 'sponsorlu', '广告', '광고'];
@@ -406,19 +414,59 @@
   }
 
   // Sampled often: the fresher the stored position, the smaller the rewind.
+  // Reads content progress from the player, which keeps describing the content
+  // even while an ad is on screen. Only trusted when the reported duration
+  // matches the content duration seen before the break — an ad reports its own.
+  function readContentProgress(player) {
+    try {
+      const ps = typeof player.getProgressState === 'function' ? player.getProgressState() : null;
+      if (!ps || !isFinite(ps.current) || !isFinite(ps.duration)) return null;
+      if (!ytContentDuration || Math.abs(ps.duration - ytContentDuration) > 1) return null;
+      if (ps.current <= 0 || ps.current >= ps.duration) return null;
+      return ps.current;
+    } catch (e) { return null; }
+  }
+
   function trackContentPosition(player) {
     if (!player) player = document.getElementById('movie_player');
     if (!player || typeof player.getCurrentTime !== 'function') return;
-    if (AD_CLASSES.some((c) => player.classList.contains(c))) return;
     const id = getWatchVideoId();
     if (!id) return;
+
+    // During an ad the media element reports the ad, so the sampled position
+    // would freeze and go stale — the old cause of large rewinds. The player's
+    // progress state still tracks the content, so keep following it.
+    if (AD_CLASSES.some((c) => player.classList.contains(c))) {
+      const live = readContentProgress(player);
+      if (live !== null && live > lastContentTime) {
+        lastContentTime = live;
+        lastContentSavedAt = Date.now();
+      }
+      return;
+    }
+
     try {
+      const d = typeof player.getDuration === 'function' ? player.getDuration() : 0;
       const data = typeof player.getVideoData === 'function' ? player.getVideoData() : null;
-      if (data && data.video_id && data.video_id !== id) return;
+      const idMatches = !data || !data.video_id || data.video_id === id;
+
+      // YouTube swaps in the ad's video_id seconds before the ad actually
+      // starts. Bailing on that alone froze the saved position early and made
+      // the resume point stale, which is what produced large rewinds. The
+      // duration is the honest signal: while it still matches the content, the
+      // stream playing really is the content.
+      const durationKnown = isFinite(d) && d > 60;
+      const stillContent = durationKnown &&
+        (!ytContentDuration || Math.abs(d - ytContentDuration) <= 1);
+      if (!idMatches && !stillContent) return;
+
       const t = player.getCurrentTime() || 0;
       // A splice-in ad reports a near-zero time; don't overwrite a real position.
       if (t <= 0.3 && lastContentVideoId === id && lastContentTime > 5) return;
+      if (ytContentDuration && t > ytContentDuration) return;
+
       const v = getYoutubeVideo(player);
+      if (durationKnown) ytContentDuration = d;
       lastContentPlaying = !!v && !v.paused;
       lastContentVideoId = id;
       lastContentTime = t;
@@ -537,6 +585,39 @@
     }
   }
 
+  // Banner ads on anime sites: click their own close control, never the banner
+  // itself. Ad networks like being clicked, so the close element must look like
+  // a close control AND be small — a full-size "close" overlay is the ad link.
+  const BANNER_HINT = /(^|[-_ ])(ads?|adv|advert|banner|reklama|promo|teaser|adfox|rtb)([-_ ]|$)/i;
+  const CLOSE_HINT = /close|закр|dismiss|×|✕|✖/i;
+  const CLOSE_MAX_PX = 60;
+
+  function closeBannerAds() {
+    if (!CLOSE_BANNERS) return;
+    const boxes = document.querySelectorAll(
+      '[class*="ad"],[id*="ad"],[class*="banner"],[id*="banner"],[class*="reklam"],[class*="promo"]'
+    );
+    for (const box of boxes) {
+      const idcls = (box.id || '') + ' ' + (box.className || '').toString();
+      if (!BANNER_HINT.test(idcls)) continue;
+      if (!isElementClickable(box)) continue;
+      const r = box.getBoundingClientRect();
+      if (r.width < 50 || r.height < 30) continue;
+
+      const closer = [...box.querySelectorAll('[class*="close"],[id*="close"],[aria-label],button,span,i')]
+        .find((c) => {
+          const label = ((c.getAttribute('aria-label') || '') + ' ' +
+            (c.className || '').toString() + ' ' + (c.id || '') + ' ' +
+            (c.textContent || '').trim()).toLowerCase();
+          if (!CLOSE_HINT.test(label)) return false;
+          const cr = c.getBoundingClientRect();
+          return cr.width > 0 && cr.height > 0 &&
+            cr.width <= CLOSE_MAX_PX && cr.height <= CLOSE_MAX_PX;
+        });
+      if (closer && safeClick(closer, 'banner-close')) return;
+    }
+  }
+
   function activate(el) {
     const rect = el.getBoundingClientRect();
     const x = rect.left + rect.width / 2;
@@ -652,6 +733,8 @@
       const raw = [...findBySelectors(introSelectors), ...findByText(introTexts)];
       dedupeElements(raw.map(collapseToClosestButton)).forEach((el) => safeClick(el, 'intro'));
     }
+
+    closeBannerAds();
   }
 
   let debounceTimer = null;
