@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto-Skip Ads & Intro (YouTube + Anime sites)
 // @namespace    local.autoskip
-// @version      1.0.0-beta.17
+// @version      1.0.0-beta.18
 // @description  Hands-free ad skipping on YouTube and auto "Skip Intro" on anime sites
 // @author       faith-in-humanity
 // @license      MIT
@@ -458,7 +458,19 @@
       const durationKnown = isFinite(d) && d > 60;
       const stillContent = durationKnown &&
         (!ytContentDuration || Math.abs(d - ytContentDuration) <= 1);
-      if (!idMatches && !stillContent) return;
+
+      // Metadata is not trustworthy on its own: YouTube can swap both the ad's
+      // video_id AND its duration in well before the ad plays, so every label
+      // says "ad" while the content is still on screen. Playback continuity
+      // cannot be faked that way — a position that keeps advancing from the
+      // last known one at roughly wall-clock speed is still the same stream.
+      const t0 = player.getCurrentTime() || 0;
+      const elapsed = lastContentSavedAt ? (Date.now() - lastContentSavedAt) / 1000 : 0;
+      const drift = t0 - lastContentTime;
+      const continues = lastContentSavedAt > 0 && lastContentTime > 0 &&
+        elapsed < 3 && drift >= -0.5 && drift <= elapsed + 1;
+
+      if (!idMatches && !stillContent && !continues) return;
 
       const t = player.getCurrentTime() || 0;
       // A splice-in ad reports a near-zero time; don't overwrite a real position.
