@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto-Skip Ads & Intro (YouTube + Anime sites)
 // @namespace    local.autoskip
-// @version      1.0.0-beta.18
+// @version      1.0.0-beta.22
 // @description  Hands-free ad skipping on YouTube and auto "Skip Intro" on anime sites
 // @author       faith-in-humanity
 // @license      MIT
@@ -130,7 +130,11 @@
   ];
 
   const UNIVERSAL_AD_TEXTS = ['Пропустить рекламу', 'Пропустить', 'Skip Ad', 'Skip Ads', 'Skip'];
-  const UNIVERSAL_INTRO_TEXTS = ['Пропустить интро', 'Пропустить опенинг', 'Skip Intro', 'Skip Recap', 'Skip Opening'];
+  const UNIVERSAL_INTRO_TEXTS = [
+    'Пропустить заставку', 'Пропустить интро', 'Пропустить опенинг', 'Пропустить вступление',
+    'Пропустить начало', 'Пропустить титры', 'Пропустить эндинг',
+    'Skip Intro', 'Skip Recap', 'Skip Opening', 'Skip OP', 'Skip ED', 'Skip Titles',
+  ];
 
   const currentHost = location.hostname.replace(/^www\./, '');
   const siteConfig = SITE_CONFIGS.find((cfg) =>
@@ -507,7 +511,7 @@
     const menu = document.querySelector('.ytp-settings-menu');
     if (menu && player) {
       const gear = player.querySelector('.ytp-settings-button');
-      if (gear) activate(gear);
+      if (gear) activateOnce(gear);
     }
   }
 
@@ -544,14 +548,14 @@
     ytQualityAttempts++;
     ytQualityLastAttemptAt = now;
 
-    activate(gear);
+    activateOnce(gear);
     const menu = document.querySelector('.ytp-settings-menu');
     if (!menu) return; // menu never opened — nothing was clicked, safe no-op
 
     const qualityItem = findMenuItemByWords(menu, QUALITY_MENU_WORDS);
     // No blind fallback: unconfirmed label means back out, never guess.
     if (!qualityItem) { closeSettingsMenu(player); return; }
-    activate(qualityItem);
+    activateOnce(qualityItem);
 
     const radios = [...document.querySelectorAll('.ytp-menuitem[role="menuitemradio"]')]
       .filter((r) => isElementClickable(r));
@@ -559,7 +563,7 @@
       (RESOLUTION_RADIO_RE.test(radios[0].textContent.trim()) ||
        radios.some((r) => /auto/i.test(r.textContent)));
     if (!looksLikeQuality) { closeSettingsMenu(player); return; }
-    activate(radios[0]); // resolutions are listed highest-first, Auto last
+    activateOnce(radios[0]); // resolutions are listed highest-first, Auto last
   }
 
   // Dialogs need tag AND text to match: a blind click could accept terms.
@@ -604,6 +608,82 @@
   const CLOSE_HINT = /close|закр|dismiss|×|✕|✖/i;
   const CLOSE_MAX_PX = 60;
 
+  // Anime-site players (XFPlayer and friends) follow the same shape as YouTube:
+  // a gear opens a menu whose quality row shows the current resolution, and
+  // clicking that row reveals the list. Every step is verified before the next
+  // click so a wrong menu never gets touched.
+  const RES_RE = /(\d{3,4})\s*p/i;
+  const GEAR_SELECTOR =
+    '[class*="setting"],[class*="gear"],[class*="cog"],[aria-label*="астрой"],[aria-label*="etting"],[title*="астрой"],[title*="etting"]';
+  const SITE_QUALITY_MAX_ATTEMPTS = 4;
+  const SITE_QUALITY_COOLDOWN_MS = 2000;
+  let siteQualityDone = false;
+  let siteQualityAttempts = 0;
+  let siteQualityLastAt = 0;
+
+  // Must be a leaf: the list container's text is every option concatenated
+  // ("1080p720p480p"), which matches the pattern too and would get clicked
+  // instead of the actual option.
+  function highestResOption(nodes) {
+    let best = null, bestVal = 0;
+    for (const n of nodes) {
+      if (n.children.length > 0) continue;
+      if (!isElementClickable(n)) continue;
+      const txt = (n.textContent || '').trim();
+      if (txt.length > 12) continue;
+      const m = txt.match(/^(\d{3,4})\s*p\b/i);
+      if (!m) continue;
+      const val = parseInt(m[1], 10);
+      if (val > bestVal) { bestVal = val; best = n; }
+    }
+    return bestVal ? { node: best, value: bestVal } : null;
+  }
+
+  function ensureSiteMaxQuality() {
+    if (!MAX_QUALITY || siteQualityDone) return;
+    const video = document.querySelector('video');
+    if (!video || !video.duration || !isFinite(video.duration)) return;
+    if (siteQualityAttempts >= SITE_QUALITY_MAX_ATTEMPTS) { siteQualityDone = true; return; }
+    const now = Date.now();
+    if (now - siteQualityLastAt < SITE_QUALITY_COOLDOWN_MS) return;
+
+    const player = video.closest('[id*="player"],[class*="player"]') || document.body;
+    const gear = [...player.querySelectorAll(GEAR_SELECTOR)].find((g) => {
+      const r = g.getBoundingClientRect();
+      return isElementClickable(g) && r.width <= 80 && r.height <= 80;
+    });
+    if (!gear) return;
+
+    siteQualityAttempts++;
+    siteQualityLastAt = now;
+    activateOnce(gear);
+
+    // The quality row is the one whose label already shows a resolution.
+    const rows = [...player.querySelectorAll('li,div,button,span,a')];
+    const row = rows.find((r) => {
+      if (!isElementClickable(r)) return false;
+      const txt = (r.textContent || '').trim();
+      return txt.length <= 40 && RES_RE.test(txt) && r.children.length <= 4;
+    });
+    if (!row) { activateOnce(gear); return; }
+    activateOnce(row);
+
+    const options = [...player.querySelectorAll('li,div,button,span,a')];
+    const best = highestResOption(options);
+    if (!best) { activateOnce(gear); return; }
+
+    const current = (row.textContent || '').match(RES_RE);
+    if (current && parseInt(current[1], 10) >= best.value) {
+      siteQualityDone = true;
+      activateOnce(gear);
+      return;
+    }
+    if (isElementClickable(best.node) && isSafeToAutoClick(best.node)) {
+      activateOnce(best.node);
+      siteQualityDone = true;
+    }
+  }
+
   function closeBannerAds() {
     if (!CLOSE_BANNERS) return;
     const boxes = document.querySelectorAll(
@@ -628,6 +708,23 @@
         });
       if (closer && safeClick(closer, 'banner-close')) return;
     }
+  }
+
+  // activate() deliberately fires both a synthetic click and el.click() for
+  // stubborn buttons, which lands TWO clicks. On a toggle (a settings gear)
+  // that opens and instantly recloses the menu, so menu work uses this single
+  // click instead.
+  function activateOnce(el) {
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+    try { el.dispatchEvent(new PointerEvent('pointerover', opts)); } catch (e) {}
+    try { el.dispatchEvent(new PointerEvent('pointerdown', opts)); } catch (e) {}
+    try { el.dispatchEvent(new PointerEvent('pointerup', opts)); } catch (e) {}
+    ['mouseover', 'mousemove', 'mousedown', 'mouseup', 'click'].forEach((type) => {
+      try { el.dispatchEvent(new MouseEvent(type, opts)); } catch (e) {}
+    });
   }
 
   function activate(el) {
@@ -747,6 +844,7 @@
     }
 
     closeBannerAds();
+    ensureSiteMaxQuality();
   }
 
   let debounceTimer = null;
