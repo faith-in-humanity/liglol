@@ -2,7 +2,7 @@
 ![Stage](https://img.shields.io/badge/stage-beta-orange)
 # Auto-Skip Ads & Intro ⏭
 
-**Hands-free ad skipping for YouTube, TikTok, and anime sites — plus a "still watching?" dialog killer and best-quality auto-select.**
+**Hands-free ad skipping for YouTube, TikTok, and anime sites — plus best-quality auto-select, banner closing, and a "still watching?" dialog killer.**
 Available as a userscript (Safari, Tampermonkey, Violentmonkey) or as a zero-permission browser extension (Chrome, Brave, Edge) — no external dependencies, no network requests, no tracking.
 
 > Start a video, walk away, cook, wash the dishes. Ads die on their own — muted, in about a second.
@@ -13,9 +13,11 @@ Available as a userscript (Safari, Tampermonkey, Violentmonkey) or as a zero-per
 
 ## What it does
 
-- **YouTube:** detects any ad (pre-roll, mid-roll, bumper, "1 of 2", unskippable) and removes it hands-free, muted, resuming exactly where it was interrupted. Auto-selects the best available video quality. Auto-dismisses the "Video paused. Continue watching?" dialog so long videos don't stall while you're away — cookie/consent prompts are never touched.
+- **YouTube:** detects any ad (pre-roll, mid-roll, bumper, "1 of 2", unskippable) and removes it hands-free, muted, resuming exactly where it was interrupted — including when YouTube's own metadata lies about your position. Auto-selects the best available video quality. Auto-dismisses the "Video paused. Continue watching?" dialog so long videos don't stall while you're away — cookie/consent prompts are never touched.
 - **TikTok:** detects sponsored/promoted videos in the feed and scrolls past them automatically.
-- **Anime sites** (jut.su, animego.org/.me, anilibria.tv, animevost.org, 2anime.ru, yummyanime.tv, gogoanime.run/.sk, 9anime.to, zoro.to, animixplay.to, twist.moe, kickassanime.ro): auto-clicks "Skip Ad" / "Skip Intro" / "Skip Opening" buttons the moment they appear.
+- **Anime sites:** auto-clicks "Skip Intro" / "Skip Opening" / "Пропустить заставку" buttons the moment they appear, picks the highest resolution the player offers, and closes ordinary banner ads by their × button.
+
+Supported anime sites: jut.su and its mirrors (including `solo-leveling-jut.su`), animego.org/.me, anilibria.tv, animevost.org, 2anime.ru, yummyanime.tv, yummyani.me (including `old.yummyani.me`), gogoanime.run/.sk, 9anime.to, zoro.to, animixplay.to, twist.moe, kickassanime.ro.
 
 ## How it works (short version)
 
@@ -25,7 +27,11 @@ YouTube marks every ad with a CSS class on the player. While that class is prese
 2. clicks the Skip button as a best-effort bonus (YouTube ignores programmatic clicks, so this alone is never relied upon);
 3. if the ad is stuck or YouTube refuses the seek (common when a network ad blocker cuts the ad's media files), it reloads the same video via the player API — the reload comes back ad-free and resumes at the same second.
 
+Resume position comes from a continuously-updated tracker rather than from the player's own reading, which is what stops the classic "mid-roll ad throws you 20–30 seconds backwards" problem. A stale or contradictory tracker value is rejected instead of used.
+
 When the ad class disappears, your original speed and sound are restored.
+
+Quality selection can't use the player API — YouTube silently ignores `setPlaybackQuality` — so the script drives the real settings menu instead, and only while no ad is playing. On anime sites the same approach works on the third-party players (gear → quality row → highest resolution).
 
 ## Install
 
@@ -48,29 +54,37 @@ No Tampermonkey, no pasting code. Requests zero permissions.
 
 Reload the tab after installing. Done — there is no on-page UI.
 
+> Tampermonkey supports the `@include` regex line that covers jut.su mirrors. Chrome match patterns can't express it, so the extension lists such mirrors one by one in `manifest.json`.
+
 ## On/off switch
 
 There is deliberately **no floating button on the page**. Toggle the whole script/extension from its icon (Userscripts toolbar icon, Tampermonkey menu, or the extension's on/off switch in `chrome://extensions`). Fine-grained switches live at the top of the file:
 
 ```js
-const SKIP_ADS = true;      // YouTube + TikTok + anime-site ads
-const SKIP_INTRO = true;    // "Skip Intro" buttons on anime sites
-const MAX_QUALITY = true;   // auto-select best YouTube video quality
-const CLOSE_POPUPS = true;  // dismiss YouTube's "still watching?" dialog
-const DEBUG = false;        // set true to see [AutoSkip] logs in the console
+const SKIP_ADS = true;       // YouTube + TikTok + anime-site ads
+const SKIP_INTRO = true;     // "Skip Intro" buttons on anime sites
+const MAX_QUALITY = true;    // auto-select best quality (YouTube + anime players)
+const CLOSE_POPUPS = true;   // dismiss YouTube's "still watching?" dialog
+const CLOSE_BANNERS = true;  // close banner ads on anime sites by their × button
+const DEBUG = false;         // set true to see [AutoSkip] logs in the console
 ```
 
 ## Add your own site
 
-1. Add a `@match https://your-site/*` line to the header (userscript) or to `matches` in `chrome-extension/manifest.json`.
-2. Add an entry to `SITE_CONFIGS` (selectors may stay empty — the universal text search finds most "Skip" buttons by their label).
+1. Add a `@match https://your-site/*` line to the header (userscript) or to `matches` in `chrome-extension/manifest.json`. A wildcard is only valid as a whole subdomain (`*.site.com`); `*-site.com` is invalid and stops the extension from loading at all.
+2. Add an entry to `SITE_CONFIGS` (selectors may stay empty — the universal text search finds most "Skip" buttons by their label, in Russian and English).
 
 ## Safety
 
 - Zero network requests, zero external dependencies, zero data collection. The whole script is one readable file, shared verbatim between the userscript and the extension.
 - Auto-clicks are guarded: the script refuses to click any link that would download a file or navigate to another domain.
+- Banner closing only clicks small × controls (a few dozen pixels) that stay on the page. A large "close button" that is really a disguised ad link is left alone.
 - The "still watching?" dialog is only touched if both its element and its text match a known confirm dialog — and never if a cookie/consent prompt is visible on screen at the same time. Consent choices are always left to you.
 - HTTPS-only site allowlist via `@match` (userscript) / `matches` (extension manifest, which requests zero `permissions`).
+
+## Known limits
+
+Anime sites embed third-party players (Kodik, Alloha, Collaps, and others) in cross-origin iframes. Ads and quality controls **inside those iframes** are unreachable from a content script without broad host permissions, which this project deliberately does not request. Everything on the page around the player is handled.
 
 ## Disclaimer
 
@@ -84,16 +98,24 @@ Skipping ads is against YouTube's Terms of Service, like any ad blocker. No acco
 
 # 🇷🇺 Русская версия
 
-**Автопропуск рекламы на YouTube, TikTok и аниме-сайтах — плюс закрытие диалога «Вы ещё смотрите?» и автовыбор лучшего качества видео.**
+**Автопропуск рекламы на YouTube, TikTok и аниме-сайтах — плюс автовыбор лучшего качества, закрытие баннеров и диалога «Вы ещё смотрите?».**
 Доступен как юзерскрипт (Safari, Tampermonkey, Violentmonkey) или как расширение браузера с нулевыми разрешениями (Chrome, Brave, Edge) — без зависимостей, без сетевых запросов, без слежки.
 
 > Включи видео и уйди готовить. Реклама умрёт сама — без звука, примерно за секунду.
 
 ## Что делает
 
-- **YouTube:** ловит любую рекламу (перед видео, посреди, «1 из 2», непропускаемую) и убирает её без рук, без звука, продолжая ровно с того места, где прервали. Сам ставит лучшее доступное качество видео. Сам закрывает диалог «Видео приостановлено. Продолжить просмотр?», чтобы длинные видео не стояли, пока тебя нет — куки-баннеры и согласия скрипт не трогает никогда.
+- **YouTube:** ловит любую рекламу (перед видео, посреди, «1 из 2», непропускаемую) и убирает её без рук, без звука, продолжая ровно с того места, где прервали — даже когда сам YouTube врёт о твоей позиции в ролике. Сам ставит лучшее доступное качество видео. Сам закрывает диалог «Видео приостановлено. Продолжить просмотр?», чтобы длинные видео не стояли, пока тебя нет — куки-баннеры и согласия скрипт не трогает никогда.
 - **TikTok:** находит рекламные/спонсорские видео в ленте и сам пролистывает их.
-- **Аниме-сайты** (jut.su, animego.org/.me, anilibria.tv, animevost.org, 2anime.ru, yummyanime.tv, gogoanime.run/.sk, 9anime.to, zoro.to, animixplay.to, twist.moe, kickassanime.ro): сам жмёт кнопки «Пропустить рекламу» / «Пропустить интро» / «Пропустить опенинг», как только они появляются.
+- **Аниме-сайты:** сам жмёт «Пропустить заставку» / «Пропустить интро» / «Пропустить опенинг», как только кнопка появляется, выбирает максимальное разрешение, которое даёт плеер, и закрывает обычные баннеры по крестику.
+
+Поддерживаемые аниме-сайты: jut.su и его зеркала (в том числе `solo-leveling-jut.su`), animego.org/.me, anilibria.tv, animevost.org, 2anime.ru, yummyanime.tv, yummyani.me (в том числе `old.yummyani.me`), gogoanime.run/.sk, 9anime.to, zoro.to, animixplay.to, twist.moe, kickassanime.ro.
+
+## Как это работает
+
+Место, с которого продолжить, берётся из собственного счётчика, а не из показаний плеера — именно это лечит классическую беду «реклама посреди ролика отбросила на 20–30 секунд назад». Устаревшее или противоречивое значение счётчика отбрасывается, а не используется.
+
+Качество нельзя выставить через API — YouTube молча игнорирует `setPlaybackQuality`. Поэтому скрипт открывает настоящее меню настроек, и только когда реклама не идёт. На аниме-сайтах — так же: шестерёнка → строка качества → самое высокое разрешение.
 
 ## Установка
 
@@ -116,24 +138,32 @@ Skipping ads is against YouTube's Terms of Service, like any ad blocker. No acco
 
 Перезагрузи вкладку после установки. Готово — кнопок на странице нет.
 
+> Tampermonkey понимает строку `@include` с регулярным выражением, которая покрывает зеркала jut.su. В Chrome такого нет, поэтому в `manifest.json` такие зеркала перечислены поимённо.
+
 ## Включение и выключение
 
 Плавающей кнопки на странице **нет специально**. Всё включается и выключается через значок расширения/скрипта (значок Userscripts в Safari, меню Tampermonkey, или переключатель расширения в `chrome://extensions`). Тонкие настройки — в начале файла:
 
 ```js
-const SKIP_ADS = true;      // реклама на YouTube + TikTok + кнопки на аниме-сайтах
-const SKIP_INTRO = true;    // кнопки «Пропустить интро» на аниме-сайтах
-const MAX_QUALITY = true;   // автовыбор лучшего качества видео на YouTube
-const CLOSE_POPUPS = true;  // закрытие диалога «Вы ещё смотрите?» на YouTube
-const DEBUG = false;        // поставь true, чтобы видеть логи [AutoSkip] в консоли
+const SKIP_ADS = true;       // реклама на YouTube + TikTok + кнопки на аниме-сайтах
+const SKIP_INTRO = true;     // кнопки «Пропустить заставку/интро» на аниме-сайтах
+const MAX_QUALITY = true;    // автовыбор лучшего качества (YouTube + аниме-плееры)
+const CLOSE_POPUPS = true;   // закрытие диалога «Вы ещё смотрите?» на YouTube
+const CLOSE_BANNERS = true;  // закрытие обычных баннеров на аниме-сайтах по крестику
+const DEBUG = false;         // поставь true, чтобы видеть логи [AutoSkip] в консоли
 ```
 
 ## Безопасность
 
 - Ни одного сетевого запроса, ни одной внешней зависимости, ноль сбора данных. Весь скрипт — один читаемый файл, одинаковый в юзерскрипте и в расширении.
 - Автоклики защищены: скрипт отказывается кликать ссылки, которые скачивают файл или ведут на чужой домен.
+- Баннеры закрываются только маленьким крестиком (несколько десятков пикселей), который остаётся на странице. Большая «кнопка закрытия», которая на самом деле замаскированная ссылка на рекламу, не трогается.
 - Диалог «Вы ещё смотрите?» трогается только если совпали И тег элемента, И текст — и никогда, если на экране одновременно виден баннер согласия на куки. Решение про куки — всегда твоё.
 - Белый список сайтов только по HTTPS через `@match` (юзерскрипт) / `matches` (манифест расширения, который не просит НИ ОДНОГО `permission`).
+
+## Чего скрипт не умеет
+
+Аниме-сайты встраивают чужие плееры (Kodik, Alloha, Collaps и другие) в iframe с другого домена. Реклама и настройки качества **внутри такого iframe** недоступны из скрипта страницы без широких разрешений на чужие домены — а их проект намеренно не просит. Всё, что на самой странице вокруг плеера, обрабатывается.
 
 ## Важно знать
 

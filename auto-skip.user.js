@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto-Skip Ads & Intro (YouTube + Anime sites)
 // @namespace    local.autoskip
-// @version      1.0.0-beta.22
+// @version      1.0.0-beta.26
 // @description  Hands-free ad skipping on YouTube and auto "Skip Intro" on anime sites
 // @author       faith-in-humanity
 // @license      MIT
@@ -27,6 +27,22 @@
 // @match        https://animixplay.to/*
 // @match        https://twist.moe/*
 // @match        https://kickassanime.ro/*
+// @match        https://kinogo.online/*
+// @match        https://*.kinogo.online/*
+// Third-party player engines. The real controls (Skip Intro, quality) live
+// inside these frames, not on the site page.
+// @match        https://*.thealloha.club/*
+// @match        https://*.stloadi.live/*
+// @match        https://*.cdnvideohub.com/*
+// @match        https://*.sevstar933krop.com/*
+// @match        https://kodikplayer.com/*
+// @match        https://*.kodikplayer.com/*
+// @match        https://kodik.info/*
+// @match        https://*.kodik.info/*
+// @match        https://*.kodik.biz/*
+// @match        https://*.kodik.cc/*
+// @match        https://*.collaps.tv/*
+// @match        https://*.collaps.site/*
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -152,12 +168,36 @@
   const lastClickAt = new WeakMap();
   const CLICK_COOLDOWN_MS = 700;
 
+  // Anime sites and kinogo nest the player in iframes. Where the frame is
+  // same-origin the controls are reachable, but only if we actually look
+  // inside it — document alone is just the outer page.
+  const FRAME_DEPTH = 3;
+  function docs(root, depth) {
+    const out = [root || document];
+    if ((depth || 0) >= FRAME_DEPTH) return out;
+    let frames;
+    try { frames = (root || document).querySelectorAll('iframe,frame'); } catch (e) { return out; }
+    for (const f of frames) {
+      let inner = null;
+      try { inner = f.contentDocument; } catch (e) { inner = null; }
+      if (inner && inner.documentElement) out.push(...docs(inner, (depth || 0) + 1));
+    }
+    return out;
+  }
+
+  function viewOf(el) {
+    return (el.ownerDocument && el.ownerDocument.defaultView) || window;
+  }
+
   function isElementClickable(el) {
-    if (!el || !(el instanceof Element)) return false;
+    // NOT `instanceof Element`: that compares against the top window's
+    // constructor, so any element from an iframe document fails it and every
+    // in-frame control silently counted as unclickable.
+    if (!el || el.nodeType !== 1) return false;
     if (el.hasAttribute('disabled')) return false;
     if (el.getAttribute('aria-disabled') === 'true') return false;
 
-    const style = window.getComputedStyle(el);
+    const style = viewOf(el).getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') return false;
 
     const opacity = parseFloat(style.opacity);
@@ -615,6 +655,12 @@
   const RES_RE = /(\d{3,4})\s*p/i;
   const GEAR_SELECTOR =
     '[class*="setting"],[class*="gear"],[class*="cog"],[aria-label*="астрой"],[aria-label*="etting"],[title*="астрой"],[title*="etting"]';
+  // Some players expose quality directly instead of hiding it behind a gear.
+  // Kodik (Flowplayer) is one: `.fp-quality` opens the list, while its
+  // `.fp-playback-settings` gear is PLAYBACK SPEED — clicking the gear there
+  // opens the wrong menu entirely.
+  const QUALITY_OPENER_SELECTOR =
+    '[class*="qual"],[class*="Qual"],[data-quality],[aria-label*="ачество"],[aria-label*="uality"],[title*="ачество"],[title*="uality"]';
   const SITE_QUALITY_MAX_ATTEMPTS = 4;
   const SITE_QUALITY_COOLDOWN_MS = 2000;
   let siteQualityDone = false;
@@ -641,54 +687,88 @@
 
   function ensureSiteMaxQuality() {
     if (!MAX_QUALITY || siteQualityDone) return;
-    const video = document.querySelector('video');
-    if (!video || !video.duration || !isFinite(video.duration)) return;
+    let video = null;
+    for (const d of docs()) {
+      const v = d.querySelector('video');
+      if (v && v.duration && isFinite(v.duration)) { video = v; break; }
+    }
+    if (!video) return;
     if (siteQualityAttempts >= SITE_QUALITY_MAX_ATTEMPTS) { siteQualityDone = true; return; }
     const now = Date.now();
     if (now - siteQualityLastAt < SITE_QUALITY_COOLDOWN_MS) return;
 
-    const player = video.closest('[id*="player"],[class*="player"]') || document.body;
-    const gear = [...player.querySelectorAll(GEAR_SELECTOR)].find((g) => {
+    const player = video.closest('[id*="player"],[class*="player"]') || video.ownerDocument.body;
+
+    // A direct quality control wins over a gear: it is unambiguous, and on
+    // players that have both, the gear is something else.
+    const opener = [...player.querySelectorAll(QUALITY_OPENER_SELECTOR)].find((q) => {
+      if (!isElementClickable(q)) return false;
+      const r = q.getBoundingClientRect();
+      if (r.width > 160 || r.height > 80) return false;
+      const txt = (q.textContent || '').trim();
+      return txt.length <= 12;
+    });
+
+    const gear = opener ? null : [...player.querySelectorAll(GEAR_SELECTOR)].find((g) => {
       const r = g.getBoundingClientRect();
       return isElementClickable(g) && r.width <= 80 && r.height <= 80;
     });
-    if (!gear) return;
+    if (!opener && !gear) return;
 
     siteQualityAttempts++;
     siteQualityLastAt = now;
-    activateOnce(gear);
 
-    // The quality row is the one whose label already shows a resolution.
-    const rows = [...player.querySelectorAll('li,div,button,span,a')];
-    const row = rows.find((r) => {
-      if (!isElementClickable(r)) return false;
-      const txt = (r.textContent || '').trim();
-      return txt.length <= 40 && RES_RE.test(txt) && r.children.length <= 4;
-    });
-    if (!row) { activateOnce(gear); return; }
-    activateOnce(row);
+    // Whatever we opened must be closed again on every bail-out, or the menu
+    // stays over the video.
+    const toggle = opener || gear;
+    activateOnce(toggle);
 
-    const options = [...player.querySelectorAll('li,div,button,span,a')];
-    const best = highestResOption(options);
-    if (!best) { activateOnce(gear); return; }
+    let currentText = opener ? (opener.textContent || '') : '';
 
-    const current = (row.textContent || '').match(RES_RE);
+    if (gear) {
+      // Gear players hide quality one level deeper: the row already showing a
+      // resolution is the quality row.
+      const rows = [...player.querySelectorAll('li,div,button,span,a')];
+      const row = rows.find((r) => {
+        if (!isElementClickable(r)) return false;
+        const txt = (r.textContent || '').trim();
+        return txt.length <= 40 && RES_RE.test(txt) && r.children.length <= 4;
+      });
+      if (!row) { activateOnce(toggle); return; }
+      activateOnce(row);
+      currentText = row.textContent || '';
+    }
+
+    const best = highestResOption([...player.querySelectorAll('li,div,button,span,a')]);
+    if (!best) { activateOnce(toggle); return; }
+
+    const current = currentText.match(RES_RE);
     if (current && parseInt(current[1], 10) >= best.value) {
       siteQualityDone = true;
-      activateOnce(gear);
+      activateOnce(toggle);
       return;
     }
     if (isElementClickable(best.node) && isSafeToAutoClick(best.node)) {
       activateOnce(best.node);
       siteQualityDone = true;
+      // Most players close their own menu on selection; the ones that don't
+      // would leave it sitting over the video.
+      if (isElementClickable(best.node)) activateOnce(toggle);
+    } else {
+      activateOnce(toggle);
     }
   }
 
   function closeBannerAds() {
     if (!CLOSE_BANNERS) return;
-    const boxes = document.querySelectorAll(
-      '[class*="ad"],[id*="ad"],[class*="banner"],[id*="banner"],[class*="reklam"],[class*="promo"]'
-    );
+    const boxes = [];
+    for (const d of docs()) {
+      try {
+        d.querySelectorAll(
+          '[class*="ad"],[id*="ad"],[class*="banner"],[id*="banner"],[class*="reklam"],[class*="promo"]'
+        ).forEach((el) => boxes.push(el));
+      } catch (e) {}
+    }
     for (const box of boxes) {
       const idcls = (box.id || '') + ' ' + (box.className || '').toString();
       if (!BANNER_HINT.test(idcls)) continue;
@@ -718,7 +798,7 @@
     const rect = el.getBoundingClientRect();
     const x = rect.left + rect.width / 2;
     const y = rect.top + rect.height / 2;
-    const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+    const opts = { bubbles: true, cancelable: true, view: viewOf(el), clientX: x, clientY: y };
     try { el.dispatchEvent(new PointerEvent('pointerover', opts)); } catch (e) {}
     try { el.dispatchEvent(new PointerEvent('pointerdown', opts)); } catch (e) {}
     try { el.dispatchEvent(new PointerEvent('pointerup', opts)); } catch (e) {}
@@ -731,7 +811,7 @@
     const rect = el.getBoundingClientRect();
     const x = rect.left + rect.width / 2;
     const y = rect.top + rect.height / 2;
-    const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+    const opts = { bubbles: true, cancelable: true, view: viewOf(el), clientX: x, clientY: y };
 
     try { el.dispatchEvent(new PointerEvent('pointerover', opts)); } catch (e) {}
     try { el.dispatchEvent(new PointerEvent('pointerdown', opts)); } catch (e) {}
@@ -749,7 +829,8 @@
     if (anchor.hasAttribute('download')) return false;
     if (/^\s*(javascript|data|blob|vbscript):/i.test(anchor.getAttribute('href') || '')) return false;
     try {
-      if (new URL(anchor.href, location.href).origin !== location.origin) return false;
+      const doc = anchor.ownerDocument || document;
+      if (new URL(anchor.href, doc.location.href).origin !== doc.location.origin) return false;
     } catch (e) {
       return false;
     }
@@ -776,19 +857,26 @@
 
   function findBySelectors(selectors) {
     const found = [];
-    for (const sel of selectors) {
-      try {
-        document.querySelectorAll(sel).forEach((el) => found.push(el));
-      } catch (e) {}
+    for (const d of docs()) {
+      for (const sel of selectors) {
+        try {
+          d.querySelectorAll(sel).forEach((el) => found.push(el));
+        } catch (e) {}
+      }
     }
     return found;
   }
 
   function findByText(texts) {
     const found = [];
-    const candidates = document.querySelectorAll(
-      'button, [role="button"], a, [class*="skip"], [id*="skip"], [aria-label]'
-    );
+    const candidates = [];
+    for (const d of docs()) {
+      try {
+        d.querySelectorAll(
+          'button, [role="button"], a, [class*="skip"], [id*="skip"], [aria-label]'
+        ).forEach((el) => candidates.push(el));
+      } catch (e) {}
+    }
     candidates.forEach((el) => {
       const content = (el.textContent || '').trim();
       const ariaLabel = (el.getAttribute('aria-label') || '').trim();
@@ -821,7 +909,17 @@
     return el.querySelector('button, [role="button"], a') || el;
   }
 
+  const isTopFrame = (function () { try { return window.top === window; } catch (e) { return false; } })();
+
+  function frameTooSmallToMatter() {
+    const de = document.documentElement;
+    if (!de) return true;
+    return de.clientWidth < 200 || de.clientHeight < 150;
+  }
+
   function tryAutoSkip() {
+    if (!isTopFrame && frameTooSmallToMatter()) return;
+
     if (isYoutube) {
       handleYoutubeAd();
       dismissYoutubePopups();

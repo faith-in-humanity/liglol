@@ -1,7 +1,6 @@
 # macOS
 .DS_Store
 
-# Editor / tooling
-.claude/
-.vscode/
-.idea/
+# Editor / tooling — every dot-directory
+.*/
+!.github/
