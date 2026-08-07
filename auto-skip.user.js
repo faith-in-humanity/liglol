@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto-Skip Ads & Intro (YouTube + Anime sites)
 // @namespace    local.autoskip
-// @version      1.0.0-beta.26
+// @version      1.0.0-beta.28
 // @description  Hands-free ad skipping on YouTube and auto "Skip Intro" on anime sites
 // @author       faith-in-humanity
 // @license      MIT
@@ -255,6 +255,44 @@
   let ytQualityLastAttemptAt = 0;
   let ytContentDuration = 0;
 
+  // A hidden tab has its timers throttled to about once a minute, so every
+  // stored timestamp goes stale while the user is away. On return Date.now()
+  // has jumped minutes ahead and each "no progress for 500ms" test is true at
+  // once — the script would declare the ad frozen and reload the whole video,
+  // or nudge pause/play, which is the several-second freeze after Alt-Tab.
+  const RESUME_GRACE_MS = 1800;
+  // A reload with no resume point restarts the video at zero, and YouTube
+  // serves the very same pre-roll pod again — measured: 42.4s of ads and six
+  // wasted reloads, versus 0.8s for the identical pod mid-video. Allow one
+  // such attempt (a reload does sometimes come back clean), then ride the ads
+  // out at speed instead of looping.
+  const ZERO_START_RELOAD_GAP_MS = 30000;
+  let ytZeroStartReloadAt = 0;
+  let becameVisibleAt = 0;
+
+  function settlingAfterResume() {
+    return becameVisibleAt > 0 && Date.now() - becameVisibleAt < RESUME_GRACE_MS;
+  }
+
+  function resetTimingAnchors() {
+    const now = Date.now();
+    becameVisibleAt = now;
+    // Drop the measurements rather than trust them: re-measure from scratch.
+    ytAdStartedAt = now;
+    ytAdProgressAt = now;
+    ytAdSeenTime = -1;
+    ytStallProgressAt = now;
+    ytStallSeenTime = -1;
+    ytLastNudgeAt = now;
+    ytLastReloadAt = now;
+    lastContentSavedAt = 0;
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) resetTimingAnchors();
+  });
+  window.addEventListener('pageshow', () => { if (!document.hidden) resetTimingAnchors(); });
+
   // --- TikTok: detect sponsored / promoted videos and scroll past them ---
   const TT_AD_LABELS = ['sponsored', 'реклама', 'promoted', 'gesponsert', 'sponsorisé', 'patrocinado', 'sponsorizzato', 'sponsorlu', '广告', '광고'];
   const TT_SKIP_COOLDOWN_MS = 2500;
@@ -349,15 +387,17 @@
       const backoff = ytReloadTimes.length >= RELOAD_LIMIT
         ? RELOAD_COOLDOWN_MS
         : RELOAD_BACKOFF_MS[Math.min(ytReloadStreak, RELOAD_BACKOFF_MS.length - 1)];
+      // While hidden the throttled timers cannot tell a frozen ad from a
+      // sleeping timer, and right after returning the player is simply
+      // rebuffering — reloading there is what caused the Alt-Tab freeze.
       const reloadReady =
+        !document.hidden &&
+        !settlingAfterResume() &&
         now - ytAdStartedAt > SEEK_PROBE_MS &&
         now - ytLastReloadAt >= backoff;
       if (reloadReady && (frozen || durationBad || dragging || seekRefused)) {
         const id = getWatchVideoId();
         if (id && typeof player.loadVideoById === 'function') {
-          ytReloadStreak++;
-          ytLastReloadAt = now;
-          ytReloadTimes.push(now);
           // Add back the untracked gap, then rewind slightly. Never skip forward.
           let start = 0;
           let src = 'tracked';
@@ -381,6 +421,16 @@
             start = lastContentTime + gap - REWIND_S;
           }
           start = start < 2 ? 0 : Math.round(start * 10) / 10;
+
+          // Nothing to come back to: another reload replays the same pod.
+          if (start <= 0) {
+            if (now - ytZeroStartReloadAt < ZERO_START_RELOAD_GAP_MS) return;
+            ytZeroStartReloadAt = now;
+          }
+
+          ytReloadStreak++;
+          ytLastReloadAt = now;
+          ytReloadTimes.push(now);
           console.log('[AutoSkip] reload src=' + src + ' start=' + start.toFixed(1) +
             ' tracked=' + lastContentTime.toFixed(1) +
             ' staleMs=' + (ytAdStartedAt - lastContentSavedAt) +
@@ -432,7 +482,8 @@
       }
 
       // Player sometimes hangs after an ad break; a pause/play nudge unfreezes it.
-      if (video && !video.paused && ytAdEndedAt && now - ytAdEndedAt < POST_AD_WATCH_MS) {
+      if (video && !video.paused && !document.hidden && !settlingAfterResume() &&
+          ytAdEndedAt && now - ytAdEndedAt < POST_AD_WATCH_MS) {
         const t = video.currentTime;
         if (t !== ytStallSeenTime) {
           ytStallSeenTime = t;
