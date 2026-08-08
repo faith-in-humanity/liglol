@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto-Skip Ads & Intro (YouTube + Anime sites)
 // @namespace    local.autoskip
-// @version      1.0.0-beta.28
+// @version      1.0.0-beta.34
 // @description  Hands-free ad skipping on YouTube and auto "Skip Intro" on anime sites
 // @author       faith-in-humanity
 // @license      MIT
@@ -145,7 +145,15 @@
     },
   ];
 
-  const UNIVERSAL_AD_TEXTS = ['Пропустить рекламу', 'Пропустить', 'Skip Ad', 'Skip Ads', 'Skip'];
+  const UNIVERSAL_AD_TEXTS = [
+    'Пропустить рекламу', 'Пропустить объявление', 'Пропустить', 'Skip Ad', 'Skip Ads', 'Skip',
+  ];
+  // Anime players run their ads through rmp-vast, whose skip control is
+  // div.rmp-ad-container-skip. Its label is configurable and its text is a
+  // live countdown ("Skip ad 5 с"), so text is the wrong thing to match on —
+  // the class name is fixed. Verified in the library source: the control has a
+  // plain click listener and no isTrusted check, unlike YouTube's.
+  const UNIVERSAL_AD_SELECTORS = ['.rmp-ad-container-skip'];
   const UNIVERSAL_INTRO_TEXTS = [
     'Пропустить заставку', 'Пропустить интро', 'Пропустить опенинг', 'Пропустить вступление',
     'Пропустить начало', 'Пропустить титры', 'Пропустить эндинг',
@@ -160,7 +168,9 @@
   const isYoutube = currentHost === 'youtube.com';
   const isTiktok = currentHost === 'tiktok.com';
 
-  const adSelectors = siteConfig ? siteConfig.ad.selectors : [];
+  const adSelectors = siteConfig
+    ? [...new Set([...siteConfig.ad.selectors, ...UNIVERSAL_AD_SELECTORS])]
+    : UNIVERSAL_AD_SELECTORS;
   const adTexts = siteConfig ? [...new Set([...siteConfig.ad.texts, ...UNIVERSAL_AD_TEXTS])] : UNIVERSAL_AD_TEXTS;
   const introSelectors = siteConfig ? siteConfig.intro.selectors : [];
   const introTexts = siteConfig ? [...new Set([...siteConfig.intro.texts, ...UNIVERSAL_INTRO_TEXTS])] : UNIVERSAL_INTRO_TEXTS;
@@ -266,8 +276,18 @@
   // wasted reloads, versus 0.8s for the identical pod mid-video. Allow one
   // such attempt (a reload does sometimes come back clean), then ride the ads
   // out at speed instead of looping.
-  const ZERO_START_RELOAD_GAP_MS = 30000;
+  // One attempt was too few: when a reload comes back carrying another ad, the
+  // script then sat idle for the whole gap — measured 15.8s of ads. A few
+  // spaced tries, then a real rest, bounds both failure modes.
+  const ZERO_START_RELOAD_GAP_MS = 4000;
+  const ZERO_START_RELOAD_MAX = 3;
+  const ZERO_START_REST_MS = 30000;
   let ytZeroStartReloadAt = 0;
+  let ytZeroStartCount = 0;
+  // Within one ad break the content position does not advance, so the resume
+  // point must be decided once. Recomputing it per reload subtracted REWIND_S
+  // again from the already-rewound position and stacked the rewind.
+  let ytBreakResumeStart = null;
   let becameVisibleAt = 0;
 
   function settlingAfterResume() {
@@ -422,9 +442,21 @@
           }
           start = start < 2 ? 0 : Math.round(start * 10) / 10;
 
-          // Nothing to come back to: another reload replays the same pod.
+          if (ytBreakResumeStart !== null) {
+            start = ytBreakResumeStart;
+            src = 'break';
+          } else {
+            ytBreakResumeStart = start;
+          }
+
+          // Nothing to come back to: a reload replays the same pod, so allow a
+          // few spaced tries and then stop hammering.
           if (start <= 0) {
-            if (now - ytZeroStartReloadAt < ZERO_START_RELOAD_GAP_MS) return;
+            const gap = ytZeroStartCount >= ZERO_START_RELOAD_MAX
+              ? ZERO_START_REST_MS : ZERO_START_RELOAD_GAP_MS;
+            if (now - ytZeroStartReloadAt < gap) return;
+            if (ytZeroStartCount >= ZERO_START_RELOAD_MAX) ytZeroStartCount = 0;
+            ytZeroStartCount++;
             ytZeroStartReloadAt = now;
           }
 
@@ -459,8 +491,10 @@
       }
 
       // Content played clean, so the last reload worked: reset the backoff.
-      if (ytReloadStreak && ytAdGoneAt && now - ytAdGoneAt > CLEAN_CONTENT_MS) {
+      if (ytAdGoneAt && now - ytAdGoneAt > CLEAN_CONTENT_MS) {
         ytReloadStreak = 0;
+        ytZeroStartCount = 0;
+        ytBreakResumeStart = null;
       }
 
       // Undo a start position that YouTube snapped back to a segment boundary.
@@ -714,6 +748,12 @@
     '[class*="qual"],[class*="Qual"],[data-quality],[aria-label*="ачество"],[aria-label*="uality"],[title*="ачество"],[title*="uality"]';
   const SITE_QUALITY_MAX_ATTEMPTS = 4;
   const SITE_QUALITY_COOLDOWN_MS = 2000;
+  // Giving up for good after 4 misses was meant to respect a person who
+  // lowered the quality by hand. But a miss is not a preference: player
+  // controls auto-hide, and a hidden gear is unreachable through no choice of
+  // theirs. So a failed run only rests, and an episode is 20+ minutes long.
+  const SITE_QUALITY_RETRY_MS = 30000;
+  let siteQualityRestAt = 0;
   let siteQualityDone = false;
   let siteQualityAttempts = 0;
   let siteQualityLastAt = 0;
@@ -744,8 +784,12 @@
       if (v && v.duration && isFinite(v.duration)) { video = v; break; }
     }
     if (!video) return;
-    if (siteQualityAttempts >= SITE_QUALITY_MAX_ATTEMPTS) { siteQualityDone = true; return; }
     const now = Date.now();
+    if (siteQualityAttempts >= SITE_QUALITY_MAX_ATTEMPTS) {
+      if (now - siteQualityRestAt < SITE_QUALITY_RETRY_MS) return;
+      siteQualityAttempts = 0;
+      siteQualityRestAt = now;
+    }
     if (now - siteQualityLastAt < SITE_QUALITY_COOLDOWN_MS) return;
 
     const player = video.closest('[id*="player"],[class*="player"]') || video.ownerDocument.body;
@@ -929,12 +973,15 @@
       } catch (e) {}
     }
     candidates.forEach((el) => {
-      const content = (el.textContent || '').trim();
-      const ariaLabel = (el.getAttribute('aria-label') || '').trim();
+      const content = (el.textContent || '').trim().toLowerCase();
+      const ariaLabel = (el.getAttribute('aria-label') || '').trim().toLowerCase();
       for (const t of texts) {
+        // Lowercased both sides: rmp-vast ships "Skip ad", the list said
+        // "Skip Ad", and an exact-case compare quietly matched neither.
+        const needle = t.toLowerCase();
         if (
-          (content && content.length <= 40 && (content === t || content.includes(t))) ||
-          (ariaLabel && (ariaLabel === t || ariaLabel.includes(t)))
+          (content && content.length <= 40 && content.includes(needle)) ||
+          (ariaLabel && ariaLabel.includes(needle))
         ) {
           found.push(el);
           break;
@@ -1012,6 +1059,120 @@
     attributes: true,
     attributeFilter: ['class', 'style', 'disabled'],
   });
+
+  // Players sit in cross-origin frames, so "nothing gets clicked" has two very
+  // different causes: the script never ran there at all, or it ran and found
+  // nothing to click. Without a marker there is no way to tell them apart.
+  // Paste __autoSkip.dump() in the console, with the frame selected.
+  try {
+    window.__autoSkip = {
+      version: '1.0.0-beta.34',
+      frame: location.href,
+      isTop: isTopFrame,
+      dump: function () {
+        const out = { version: '1.0.0-beta.34', frame: location.href, isTop: isTopFrame,
+                      documents: [], videos: [], qualityOpeners: [], gears: [], skipButtons: [], smallLabels: [] };
+        for (const d of docs()) {
+          try { out.documents.push(d.location.href.slice(0, 90)); } catch (e) { out.documents.push('[blocked]'); }
+          try {
+            d.querySelectorAll('video').forEach((v) => out.videos.push({
+              duration: v.duration, paused: v.paused, w: v.videoWidth, h: v.videoHeight,
+              src: (v.currentSrc || v.src || '').slice(0, 60) }));
+          } catch (e) {}
+          const describe = (el) => ({
+            tag: el.tagName, cls: String(el.className || '').slice(0, 50),
+            text: (el.textContent || '').trim().slice(0, 25),
+            label: (el.getAttribute('aria-label') || el.getAttribute('title') || '').slice(0, 25),
+            w: Math.round(el.getBoundingClientRect().width),
+            h: Math.round(el.getBoundingClientRect().height),
+            clickable: isElementClickable(el) });
+          try { d.querySelectorAll(QUALITY_OPENER_SELECTOR).forEach((e) => out.qualityOpeners.push(describe(e))); } catch (e) {}
+          try { d.querySelectorAll(GEAR_SELECTOR).forEach((e) => out.gears.push(describe(e))); } catch (e) {}
+          try {
+            d.querySelectorAll('button,[role="button"],a,div,span').forEach((e) => {
+              if (e.children.length) return;
+              const t = (e.textContent || '').trim();
+              if (!t || t.length > 30) return;
+              if (/пропуст|skip/i.test(t)) out.skipButtons.push(describe(e));
+              else if (t.length <= 12 && isElementClickable(e)) out.smallLabels.push(t);
+            });
+          } catch (e) {}
+        }
+        out.smallLabels = [...new Set(out.smallLabels)].slice(0, 40);
+        out.state = { qualityAttempts: siteQualityAttempts, qualityDone: siteQualityDone,
+                      restingSince: siteQualityRestAt };
+        // Exactly what the row matcher and the option picker look for, so a
+        // dump says which of the two steps fails rather than just "no".
+        out.qualityRows = [];
+        out.leafResOptions = [];
+        for (const d of docs()) {
+          try {
+            d.querySelectorAll('li,div,button,span,a').forEach((e) => {
+              const t = (e.textContent || '').trim();
+              if (!t || t.length > 40 || !RES_RE.test(t)) return;
+              const r = e.getBoundingClientRect();
+              if (e.children.length <= 4) {
+                out.qualityRows.push({ tag: e.tagName, cls: String(e.className || '').slice(0, 45),
+                  text: t.slice(0, 30), kids: e.children.length,
+                  w: Math.round(r.width), h: Math.round(r.height),
+                  clickable: isElementClickable(e) });
+              }
+              if (e.children.length === 0 && t.length <= 12 && /^(\d{3,4})\s*p\b/i.test(t)) {
+                out.leafResOptions.push({ tag: e.tagName, text: t,
+                  clickable: isElementClickable(e) });
+              }
+            });
+          } catch (e) {}
+        }
+        out.qualityRows = out.qualityRows.slice(0, 25);
+        out.leafResOptions = out.leafResOptions.slice(0, 25);
+        return out;
+      },
+      // The player lives in a cross-origin frame, so a dump typed in the top
+      // console cannot see it, and switching frame context by hand is a poor
+      // thing to ask for. Each copy answers a ping instead, and the top one
+      // collects the replies.
+      // Clicking into the console closes the player's own menu, so the
+      // interesting DOM is gone by the time a plain dump runs. Delay it and
+      // let the menu be opened by hand first.
+      dumpAll: function (delaySeconds) {
+        const wait = Math.max(0, Number(delaySeconds) || 0) * 1000;
+        if (wait) {
+          console.log('AutoSkip: open the player menu now — reading in ' + (wait / 1000) + 's');
+          setTimeout(() => window.__autoSkip.dumpAll(), wait);
+          return 'waiting ' + (wait / 1000) + 's...';
+        }
+        const replies = [];
+        const onReply = (e) => {
+          if (e.data && e.data.__autoSkipReply) replies.push(e.data.__autoSkipReply);
+        };
+        window.addEventListener('message', onReply);
+        const walk = (w, depth) => {
+          try { w.postMessage({ __autoSkipPing: true }, '*'); } catch (err) {}
+          if (depth > 3) return;
+          let n = 0;
+          try { n = w.frames.length; } catch (err) { return; }
+          for (let i = 0; i < n; i++) {
+            try { walk(w.frames[i], depth + 1); } catch (err) {}
+          }
+        };
+        walk(window.top || window, 0);
+        setTimeout(() => {
+          window.removeEventListener('message', onReply);
+          console.log('=== AutoSkip: ' + replies.length + ' frame(s) reported ===');
+          console.log(JSON.stringify(replies, null, 1));
+        }, 800);
+        return 'collecting... result appears below in about a second';
+      },
+    };
+
+    window.addEventListener('message', (e) => {
+      if (!e.data || e.data.__autoSkipPing !== true) return;
+      let payload;
+      try { payload = window.__autoSkip.dump(); } catch (err) { payload = { error: String(err) }; }
+      try { e.source.postMessage({ __autoSkipReply: payload }, '*'); } catch (err) {}
+    });
+  } catch (e) {}
 
   tryAutoSkip();
   setInterval(tryAutoSkip, 300);
