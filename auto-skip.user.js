@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto-Skip Ads & Intro (YouTube + Anime sites)
 // @namespace    local.autoskip
-// @version      1.0.0-beta.34
+// @version      1.0.0-beta.36
 // @description  Hands-free ad skipping on YouTube and auto "Skip Intro" on anime sites
 // @author       faith-in-humanity
 // @license      MIT
@@ -744,6 +744,7 @@
   // Kodik (Flowplayer) is one: `.fp-quality` opens the list, while its
   // `.fp-playback-settings` gear is PLAYBACK SPEED — clicking the gear there
   // opens the wrong menu entirely.
+  const QUALITY_LABEL_RE = /качеств|quality/i;
   const QUALITY_OPENER_SELECTOR =
     '[class*="qual"],[class*="Qual"],[data-quality],[aria-label*="ачество"],[aria-label*="uality"],[title*="ачество"],[title*="uality"]';
   const SITE_QUALITY_MAX_ATTEMPTS = 4;
@@ -778,10 +779,17 @@
 
   function ensureSiteMaxQuality() {
     if (!MAX_QUALITY || siteQualityDone) return;
+    // querySelectorAll, not querySelector: a page can hold several video
+    // elements (trailer, preview, the real player). Checking only the first
+    // one meant that if it was not ready yet, quality was never set at all.
     let video = null;
     for (const d of docs()) {
-      const v = d.querySelector('video');
-      if (v && v.duration && isFinite(v.duration)) { video = v; break; }
+      let list;
+      try { list = d.querySelectorAll('video'); } catch (e) { continue; }
+      for (const v of list) {
+        if (v && v.duration && isFinite(v.duration) && v.duration > 0) { video = v; break; }
+      }
+      if (video) break;
     }
     if (!video) return;
     const now = Date.now();
@@ -796,12 +804,19 @@
 
     // A direct quality control wins over a gear: it is unambiguous, and on
     // players that have both, the gear is something else.
+    // A label naming quality is proof enough; a short text is only a fallback.
+    // The old "text <= 12 chars" rule threw away every real control found so
+    // far: jut.su's button says "Выбрать качество" (16), Alloha's row says
+    // "Качество 480p" (13). Size still rules out whole menu containers.
     const opener = [...player.querySelectorAll(QUALITY_OPENER_SELECTOR)].find((q) => {
       if (!isElementClickable(q)) return false;
       const r = q.getBoundingClientRect();
-      if (r.width > 160 || r.height > 80) return false;
+      if (r.width > 200 || r.height > 80) return false;
+      const label = ((q.getAttribute('aria-label') || '') + ' ' +
+                     (q.getAttribute('title') || '')).trim();
+      if (QUALITY_LABEL_RE.test(label)) return true;
       const txt = (q.textContent || '').trim();
-      return txt.length <= 12;
+      return txt.length <= 24;
     });
 
     const gear = opener ? null : [...player.querySelectorAll(GEAR_SELECTOR)].find((g) => {
@@ -1066,11 +1081,11 @@
   // Paste __autoSkip.dump() in the console, with the frame selected.
   try {
     window.__autoSkip = {
-      version: '1.0.0-beta.34',
+      version: '1.0.0-beta.36',
       frame: location.href,
       isTop: isTopFrame,
       dump: function () {
-        const out = { version: '1.0.0-beta.34', frame: location.href, isTop: isTopFrame,
+        const out = { version: '1.0.0-beta.36', frame: location.href, isTop: isTopFrame,
                       documents: [], videos: [], qualityOpeners: [], gears: [], skipButtons: [], smallLabels: [] };
         for (const d of docs()) {
           try { out.documents.push(d.location.href.slice(0, 90)); } catch (e) { out.documents.push('[blocked]'); }

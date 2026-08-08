@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Auto-Skip Ads & Intro (YouTube + Anime)",
-  "version": "1.3.4",
+  "version": "1.3.5",
   "description": "Hands-free ad skipping on YouTube and auto \"Skip Intro\" on anime sites. No network requests, no tracking.",
   "author": "faith-in-humanity",
   "content_scripts": [
