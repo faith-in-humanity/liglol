@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto-Skip Ads & Intro (YouTube + Anime sites)
 // @namespace    local.autoskip
-// @version      1.0.0-beta.36
+// @version      1.0.0-beta.37
 // @description  Hands-free ad skipping on YouTube and auto "Skip Intro" on anime sites
 // @author       faith-in-humanity
 // @license      MIT
@@ -823,14 +823,45 @@
       const r = g.getBoundingClientRect();
       return isElementClickable(g) && r.width <= 80 && r.height <= 80;
     });
-    if (!opener && !gear) return;
+    // Playerjs (anilibria and friends) renders its whole UI as <PJSDIV> with no
+    // class names at all — 306 such elements on one page — so neither selector
+    // above can ever match. The only handle left is the text: a control bar
+    // shows the current resolution, and an open menu shows several. One visible
+    // "720p" means that is the opener; several mean the menu is already open.
+    let resBadge = null;
+    if (!opener && !gear) {
+      const visibleRes = [];
+      for (const el of player.querySelectorAll('*')) {
+        if (el.children.length) continue;
+        const t = (el.textContent || '').trim();
+        if (!/^\d{3,4}\s*p$/i.test(t)) continue;
+        if (!isElementClickable(el)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width > 120 || r.height > 60) continue;
+        visibleRes.push(el);
+      }
+      if (visibleRes.length === 1) resBadge = visibleRes[0];
+      else if (visibleRes.length > 1) {
+        // Menu already open: pick straight from it, nothing to toggle.
+        const top = highestResOption(visibleRes);
+        const cur = visibleRes.map((e) => parseInt((e.textContent || '').trim(), 10));
+        if (top && Math.max(...cur) > 0) {
+          siteQualityAttempts++;
+          siteQualityLastAt = now;
+          if (isSafeToAutoClick(top.node)) { activateOnce(top.node); siteQualityDone = true; }
+        }
+        return;
+      }
+    }
+
+    if (!opener && !gear && !resBadge) return;
 
     siteQualityAttempts++;
     siteQualityLastAt = now;
 
     // Whatever we opened must be closed again on every bail-out, or the menu
     // stays over the video.
-    const toggle = opener || gear;
+    const toggle = opener || gear || resBadge;
     activateOnce(toggle);
 
     let currentText = opener ? (opener.textContent || '') : '';
@@ -1081,11 +1112,11 @@
   // Paste __autoSkip.dump() in the console, with the frame selected.
   try {
     window.__autoSkip = {
-      version: '1.0.0-beta.36',
+      version: '1.0.0-beta.37',
       frame: location.href,
       isTop: isTopFrame,
       dump: function () {
-        const out = { version: '1.0.0-beta.36', frame: location.href, isTop: isTopFrame,
+        const out = { version: '1.0.0-beta.37', frame: location.href, isTop: isTopFrame,
                       documents: [], videos: [], qualityOpeners: [], gears: [], skipButtons: [], smallLabels: [] };
         for (const d of docs()) {
           try { out.documents.push(d.location.href.slice(0, 90)); } catch (e) { out.documents.push('[blocked]'); }
